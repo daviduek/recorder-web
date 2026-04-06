@@ -21,9 +21,12 @@ Copiar `.env.example` a `.env.local` y completar:
 
 ```bash
 GOOGLE_APPLICATION_CREDENTIALS=C:\path\to\service-account.json
+GOOGLE_CREDENTIALS_JSON=base64_or_json_service_account
 GEMINI_API_KEY=your_google_ai_studio_key
 GEMINI_MODEL=gemini-2.5-flash
 ```
+
+Para deploy (por ejemplo en Vercel), usa `GOOGLE_CREDENTIALS_JSON` con el JSON completo de la service account (o en base64). En local podes seguir usando `GOOGLE_APPLICATION_CREDENTIALS`.
 
 ## 2) Servicios a habilitar en Google Cloud
 
@@ -41,6 +44,15 @@ npm run dev
 
 Abrir:
 - http://localhost:3000
+
+## Deploy recomendado (Vercel)
+
+1. Importar el repo en Vercel.
+2. Definir variables de entorno:
+   - `GOOGLE_CREDENTIALS_JSON`
+   - `GEMINI_API_KEY`
+   - `GEMINI_MODEL` (opcional)
+3. Deploy.
 
 ## Flujo funcional
 

@@ -6,8 +6,41 @@ import type { SupportedLanguage } from "@/lib/types";
 
 const SPEECH_LANGUAGES: SupportedLanguage[] = ["es-AR", "en-US", "iw-IL"];
 
-const speechClient = new speech.SpeechClient();
-const textToSpeechClient = new textToSpeech.TextToSpeechClient();
+type GoogleServiceAccount = {
+  client_email: string;
+  private_key: string;
+};
+
+function parseInlineCredentials(): GoogleServiceAccount | null {
+  const inline = process.env.GOOGLE_CREDENTIALS_JSON;
+  if (!inline) return null;
+
+  try {
+    if (inline.trim().startsWith("{")) {
+      return JSON.parse(inline) as GoogleServiceAccount;
+    }
+
+    const decoded = Buffer.from(inline, "base64").toString("utf-8");
+    return JSON.parse(decoded) as GoogleServiceAccount;
+  } catch {
+    return null;
+  }
+}
+
+const inlineCredentials = parseInlineCredentials();
+const googleAuthOptions = inlineCredentials
+  ? {
+      credentials: {
+        client_email: inlineCredentials.client_email,
+        private_key: inlineCredentials.private_key,
+      },
+    }
+  : {};
+
+const speechClient = new speech.SpeechClient(googleAuthOptions);
+const textToSpeechClient = new textToSpeech.TextToSpeechClient(
+  googleAuthOptions,
+);
 
 function normalizeLanguageCode(language: string): "es-AR" | "en-US" | "he-IL" {
   if (language.startsWith("en")) {
