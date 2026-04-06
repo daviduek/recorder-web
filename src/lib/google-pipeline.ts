@@ -7,7 +7,7 @@ import textToSpeech from "@google-cloud/text-to-speech";
 
 import type { SupportedLanguage } from "@/lib/types";
 
-const SPEECH_LANGUAGES: SupportedLanguage[] = ["es-AR", "en-US", "he-IL"];
+const SPEECH_LANGUAGES: SupportedLanguage[] = ["es-AR", "en-US", "iw-IL"];
 
 type GoogleServiceAccount = {
   client_email: string;
@@ -82,12 +82,26 @@ function toSupportedLanguage(language: string): SupportedLanguage | "unknown" {
     return "en-US";
   }
   if (language.startsWith("iw") || language.startsWith("he")) {
-    return "he-IL";
+    return "iw-IL";
   }
   if (language.startsWith("es")) {
     return "es-AR";
   }
   return "unknown";
+}
+
+function hasHebrewCharacters(text: string) {
+  return /[\u0590-\u05FF]/.test(text);
+}
+
+function inferLanguageFromTranscript(
+  transcript: string,
+  detectedFromApi: string,
+): SupportedLanguage | "unknown" {
+  if (hasHebrewCharacters(transcript)) {
+    return "iw-IL";
+  }
+  return toSupportedLanguage(detectedFromApi);
 }
 
 function summarizeFallback(transcript: string) {
@@ -169,6 +183,19 @@ export async function transcribeFromGcs(
       languageCode: SPEECH_LANGUAGES[0],
       alternativeLanguageCodes: SPEECH_LANGUAGES.slice(1),
       enableAutomaticPunctuation: true,
+      speechContexts: [
+        {
+          phrases: [
+            "שלום",
+            "תודה",
+            "בוקר טוב",
+            "ערב טוב",
+            "מה נשמע",
+            "shalom",
+            "todah",
+          ],
+        },
+      ],
       encoding: speechEncodingFromMime(mimeType),
     },
     audio: {
@@ -184,11 +211,70 @@ export async function transcribeFromGcs(
 
   const transcript = lines.join(" ").trim();
   const detectedFromResult = response.results?.[0]?.languageCode ?? "";
+  const detectedLanguage = inferLanguageFromTranscript(
+    transcript,
+    detectedFromResult,
+  );
+  const polishedTranscript = await improveTranscriptForReadability(
+    transcript,
+    detectedLanguage,
+  );
 
   return {
-    transcript,
-    detectedLanguage: toSupportedLanguage(detectedFromResult),
+    transcript: polishedTranscript,
+    detectedLanguage,
   };
+}
+
+async function improveTranscriptForReadability(
+  transcript: string,
+  detectedLanguage: SupportedLanguage | "unknown",
+) {
+  const input = transcript.trim();
+  if (!input) return input;
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return input;
+
+  try {
+    const ai = new GoogleGenAI({ apiKey });
+    const response = await ai.models.generateContent({
+      model: process.env.GEMINI_MODEL ?? "gemini-2.5-flash",
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              text: [
+                "Mejora esta transcripcion ASR sin inventar informacion.",
+                "Reglas:",
+                "1) Mantener todo el contenido original.",
+                "2) Corregir puntuacion, mayusculas y segmentacion en frases.",
+                "3) Conservar palabras y frases en su idioma original (espanol, ingles, hebreo).",
+                "4) Si hay hebreo, mantenerlo en caracteres hebreos (no transliterar).",
+                "5) No resumir ni agregar datos.",
+                "",
+                `Idioma detectado aproximado: ${detectedLanguage}`,
+                "",
+                "Devuelve solo el texto final mejorado.",
+                "",
+                "TRANSCRIPCION CRUDA:",
+                input,
+              ].join("\n"),
+            },
+          ],
+        },
+      ],
+      config: {
+        temperature: 0.1,
+      },
+    });
+
+    const output = response.text?.trim();
+    return output && output.length > 0 ? output : input;
+  } catch {
+    return input;
+  }
 }
 
 export async function summarizeTranscript(transcript: string) {

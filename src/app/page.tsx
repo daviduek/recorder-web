@@ -9,7 +9,7 @@ const MAX_RECORDING_SECONDS = 1200;
 
 function languageLabel(code: RecordingItem["detectedLanguage"]) {
   if (code === "en-US") return "Ingles";
-  if (code === "he-IL") return "Hebreo";
+  if (code === "iw-IL") return "Hebreo";
   if (code === "es-AR") return "Espanol";
   return "Sin detectar";
 }

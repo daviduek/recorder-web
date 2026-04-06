@@ -1,4 +1,4 @@
-export type SupportedLanguage = "es-AR" | "en-US" | "he-IL";
+export type SupportedLanguage = "es-AR" | "en-US" | "iw-IL";
 
 export type RecordingItem = {
   id: string;
