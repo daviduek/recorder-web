@@ -7,12 +7,42 @@ import textToSpeech from "@google-cloud/text-to-speech";
 
 import type { SupportedLanguage } from "@/lib/types";
 
-const SPEECH_LANGUAGES: SupportedLanguage[] = ["es-AR", "en-US", "iw-IL"];
+const HEBREW_PHRASES = [
+  "שלום",
+  "תודה",
+  "בוקר טוב",
+  "ערב טוב",
+  "מה נשמע",
+  "בסדר",
+  "אני צריך",
+  "אני רוצה",
+  "כן",
+  "לא",
+];
+
+const MIXED_CONTEXT_PHRASES = [
+  "context",
+  "summary",
+  "producto",
+  "proyecto",
+  "integracion",
+  "meeting",
+  "roadmap",
+  "shalom",
+  "todah",
+  ...HEBREW_PHRASES,
+];
 
 type GoogleServiceAccount = {
   client_email: string;
   private_key: string;
   project_id?: string;
+};
+
+type TranscriptionCandidate = {
+  transcript: string;
+  detectedLanguage: SupportedLanguage | "unknown";
+  averageConfidence: number;
 };
 
 function parseInlineCredentials(): GoogleServiceAccount | null {
@@ -113,6 +143,27 @@ function summarizeFallback(transcript: string) {
   return `Resumen rapido: ${trimmed.slice(0, 600)}${trimmed.length > 600 ? "..." : ""}`;
 }
 
+function getAverageConfidence(
+  results: Array<{ alternatives?: Array<{ confidence?: number | null }> | null }> = [],
+) {
+  const confidences = results
+    .map((result) => result.alternatives?.[0]?.confidence)
+    .filter((value): value is number => typeof value === "number" && value > 0);
+
+  if (confidences.length === 0) return 0;
+  return confidences.reduce((sum, value) => sum + value, 0) / confidences.length;
+}
+
+function scoreCandidate(candidate: TranscriptionCandidate) {
+  const transcript = candidate.transcript.trim();
+  if (!transcript) return -1_000;
+
+  let score = transcript.length * 0.03 + candidate.averageConfidence * 100;
+  if (hasHebrewCharacters(transcript)) score += 35;
+  if (candidate.detectedLanguage === "iw-IL") score += 20;
+  return score;
+}
+
 async function ensureBucket() {
   const explicitBucket = process.env.GOOGLE_STORAGE_BUCKET?.trim();
   if (explicitBucket) {
@@ -174,26 +225,23 @@ export async function createSignedUploadTarget(mimeType: string) {
   };
 }
 
-export async function transcribeFromGcs(
+async function transcribePass(
   gcsUri: string,
   mimeType: string,
-): Promise<{ transcript: string; detectedLanguage: SupportedLanguage | "unknown" }> {
+  primaryLanguage: SupportedLanguage,
+  alternativeLanguages: SupportedLanguage[],
+): Promise<TranscriptionCandidate> {
   const [operation] = await speechClient.longRunningRecognize({
     config: {
-      languageCode: SPEECH_LANGUAGES[0],
-      alternativeLanguageCodes: SPEECH_LANGUAGES.slice(1),
+      languageCode: primaryLanguage,
+      alternativeLanguageCodes: alternativeLanguages,
       enableAutomaticPunctuation: true,
       speechContexts: [
         {
-          phrases: [
-            "שלום",
-            "תודה",
-            "בוקר טוב",
-            "ערב טוב",
-            "מה נשמע",
-            "shalom",
-            "todah",
-          ],
+          phrases: MIXED_CONTEXT_PHRASES,
+        },
+        {
+          phrases: HEBREW_PHRASES,
         },
       ],
       encoding: speechEncodingFromMime(mimeType),
@@ -204,25 +252,58 @@ export async function transcribeFromGcs(
   });
 
   const [response] = await operation.promise();
-  const lines =
-    response.results
-      ?.map((result) => result.alternatives?.[0]?.transcript?.trim() ?? "")
-      .filter(Boolean) ?? [];
+  const results = response.results ?? [];
+  const lines = results
+    .map((result) => result.alternatives?.[0]?.transcript?.trim() ?? "")
+    .filter(Boolean);
 
   const transcript = lines.join(" ").trim();
   const detectedFromResult = response.results?.[0]?.languageCode ?? "";
-  const detectedLanguage = inferLanguageFromTranscript(
+
+  return {
     transcript,
-    detectedFromResult,
+    detectedLanguage: inferLanguageFromTranscript(transcript, detectedFromResult),
+    averageConfidence: getAverageConfidence(results),
+  };
+}
+
+export async function transcribeFromGcs(
+  gcsUri: string,
+  mimeType: string,
+): Promise<{ transcript: string; detectedLanguage: SupportedLanguage | "unknown" }> {
+  const defaultCandidate = await transcribePass(
+    gcsUri,
+    mimeType,
+    "es-AR",
+    ["en-US", "iw-IL"],
   );
+  let bestCandidate = defaultCandidate;
+
+  const shouldRunHebrewPriorityPass =
+    !hasHebrewCharacters(defaultCandidate.transcript) ||
+    defaultCandidate.detectedLanguage !== "iw-IL";
+
+  if (shouldRunHebrewPriorityPass) {
+    const hebrewPriorityCandidate = await transcribePass(
+      gcsUri,
+      mimeType,
+      "iw-IL",
+      ["es-AR", "en-US"],
+    );
+
+    if (scoreCandidate(hebrewPriorityCandidate) > scoreCandidate(bestCandidate)) {
+      bestCandidate = hebrewPriorityCandidate;
+    }
+  }
+
   const polishedTranscript = await improveTranscriptForReadability(
-    transcript,
-    detectedLanguage,
+    bestCandidate.transcript,
+    bestCandidate.detectedLanguage,
   );
 
   return {
     transcript: polishedTranscript,
-    detectedLanguage,
+    detectedLanguage: bestCandidate.detectedLanguage,
   };
 }
 
@@ -252,7 +333,8 @@ async function improveTranscriptForReadability(
                 "2) Corregir puntuacion, mayusculas y segmentacion en frases.",
                 "3) Conservar palabras y frases en su idioma original (espanol, ingles, hebreo).",
                 "4) Si hay hebreo, mantenerlo en caracteres hebreos (no transliterar).",
-                "5) No resumir ni agregar datos.",
+                "5) Resolver frases poco claras usando el contexto de frases cercanas, sin inventar hechos nuevos.",
+                "6) No resumir ni agregar datos.",
                 "",
                 `Idioma detectado aproximado: ${detectedLanguage}`,
                 "",
