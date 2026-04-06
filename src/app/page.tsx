@@ -183,10 +183,15 @@ export default function Home() {
       });
       setSeconds(0);
     } catch (caughtError) {
-      setError(
+      const message =
         caughtError instanceof Error
           ? caughtError.message
-          : "No se pudo completar el proceso.",
+          : "No se pudo completar el proceso.";
+
+      setError(
+        message === "Failed to fetch"
+          ? "Fallo de red/CORS al subir audio. Si persiste, revisamos permisos del bucket de Google Cloud."
+          : message,
       );
     } finally {
       setProcessing(false);
