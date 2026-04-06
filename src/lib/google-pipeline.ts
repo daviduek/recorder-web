@@ -40,6 +40,7 @@ type GoogleServiceAccount = {
 };
 
 type TranscriptionCandidate = {
+  source: "auto" | "es" | "en" | "he";
   transcript: string;
   detectedLanguage: SupportedLanguage | "unknown";
   averageConfidence: number;
@@ -161,6 +162,7 @@ function scoreCandidate(candidate: TranscriptionCandidate) {
   let score = transcript.length * 0.03 + candidate.averageConfidence * 100;
   if (hasHebrewCharacters(transcript)) score += 35;
   if (candidate.detectedLanguage === "iw-IL") score += 20;
+  if (candidate.source === "he" && hasHebrewCharacters(transcript)) score += 15;
   return score;
 }
 
@@ -226,10 +228,11 @@ export async function createSignedUploadTarget(mimeType: string) {
 }
 
 async function transcribePass(
+  source: TranscriptionCandidate["source"],
   gcsUri: string,
   mimeType: string,
   primaryLanguage: SupportedLanguage,
-  alternativeLanguages: SupportedLanguage[],
+  alternativeLanguages: SupportedLanguage[] = [],
 ): Promise<TranscriptionCandidate> {
   const [operation] = await speechClient.longRunningRecognize({
     config: {
@@ -261,40 +264,110 @@ async function transcribePass(
   const detectedFromResult = response.results?.[0]?.languageCode ?? "";
 
   return {
+    source,
     transcript,
     detectedLanguage: inferLanguageFromTranscript(transcript, detectedFromResult),
     averageConfidence: getAverageConfidence(results),
   };
 }
 
+function simpleFusion(candidates: TranscriptionCandidate[]) {
+  const ordered = [...candidates].sort(
+    (a, b) => scoreCandidate(b) - scoreCandidate(a),
+  );
+  return ordered[0];
+}
+
+async function fuseCandidatesWithLLM(candidates: TranscriptionCandidate[]) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return simpleFusion(candidates);
+
+  try {
+    const ai = new GoogleGenAI({ apiKey });
+    const payload = candidates.map((candidate) => ({
+      source: candidate.source,
+      language: candidate.detectedLanguage,
+      confidence: Number(candidate.averageConfidence.toFixed(4)),
+      transcript: candidate.transcript,
+    }));
+
+    const response = await ai.models.generateContent({
+      model: process.env.GEMINI_MODEL ?? "gemini-2.5-flash",
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              text: [
+                "Sos un fusionador experto de ASR multilingue (espanol, ingles, hebreo).",
+                "Te paso 4 hipotesis del mismo audio.",
+                "Objetivo: devolver la mejor transcripcion final, respetando mezcla de idiomas.",
+                "Reglas:",
+                "1) No inventar contenido.",
+                "2) Priorizar hipotesis con mejor sentido global.",
+                "3) Si una palabra corta hebrea aparece solo en hipotesis he y es coherente, conservarla.",
+                "4) Mantener hebreo en caracteres hebreos.",
+                "5) No resumir.",
+                "",
+                "Devolver JSON estricto con esta forma:",
+                '{"chosenSource":"auto|es|en|he","transcript":"...","detectedLanguage":"es-AR|en-US|iw-IL|unknown"}',
+                "",
+                "HIPOTESIS:",
+                JSON.stringify(payload),
+              ].join("\n"),
+            },
+          ],
+        },
+      ],
+      config: {
+        temperature: 0.1,
+      },
+    });
+
+    const raw = response.text?.trim();
+    if (!raw) return simpleFusion(candidates);
+
+    const cleaned = raw.replace(/^```json\s*/i, "").replace(/```$/, "").trim();
+    const parsed = JSON.parse(cleaned) as {
+      chosenSource?: "auto" | "es" | "en" | "he";
+      transcript?: string;
+      detectedLanguage?: SupportedLanguage | "unknown";
+    };
+
+    const picked = candidates.find((candidate) => candidate.source === parsed.chosenSource);
+    const transcript = parsed.transcript?.trim();
+    const detectedLanguage = parsed.detectedLanguage ?? picked?.detectedLanguage ?? "unknown";
+
+    if (picked && transcript) {
+      return {
+        ...picked,
+        transcript,
+        detectedLanguage,
+      };
+    }
+
+    return simpleFusion(candidates);
+  } catch {
+    return simpleFusion(candidates);
+  }
+}
+
 export async function transcribeFromGcs(
   gcsUri: string,
   mimeType: string,
 ): Promise<{ transcript: string; detectedLanguage: SupportedLanguage | "unknown" }> {
-  const defaultCandidate = await transcribePass(
+  const autoPromise = transcribePass(
+    "auto",
     gcsUri,
     mimeType,
     "es-AR",
     ["en-US", "iw-IL"],
   );
-  let bestCandidate = defaultCandidate;
-
-  const shouldRunHebrewPriorityPass =
-    !hasHebrewCharacters(defaultCandidate.transcript) ||
-    defaultCandidate.detectedLanguage !== "iw-IL";
-
-  if (shouldRunHebrewPriorityPass) {
-    const hebrewPriorityCandidate = await transcribePass(
-      gcsUri,
-      mimeType,
-      "iw-IL",
-      ["es-AR", "en-US"],
-    );
-
-    if (scoreCandidate(hebrewPriorityCandidate) > scoreCandidate(bestCandidate)) {
-      bestCandidate = hebrewPriorityCandidate;
-    }
-  }
+  const esPromise = transcribePass("es", gcsUri, mimeType, "es-AR");
+  const enPromise = transcribePass("en", gcsUri, mimeType, "en-US");
+  const hePromise = transcribePass("he", gcsUri, mimeType, "iw-IL");
+  const candidates = await Promise.all([autoPromise, esPromise, enPromise, hePromise]);
+  const bestCandidate = await fuseCandidatesWithLLM(candidates);
 
   const polishedTranscript = await improveTranscriptForReadability(
     bestCandidate.transcript,
