@@ -101,8 +101,18 @@ function summarizeFallback(transcript: string) {
 
 async function ensureBucket() {
   const explicitBucket = process.env.GOOGLE_STORAGE_BUCKET?.trim();
-  let bucketName = explicitBucket;
+  if (explicitBucket) {
+    const explicit = storageClient.bucket(explicitBucket);
+    const [exists] = await explicit.exists();
+    if (!exists) {
+      throw new Error(
+        `El bucket configurado (${explicitBucket}) no existe. Crealo manualmente y otorgale acceso de escritura a la service account.`,
+      );
+    }
+    return explicitBucket;
+  }
 
+  let bucketName = explicitBucket;
   if (!bucketName) {
     if (!projectId) {
       throw new Error(
