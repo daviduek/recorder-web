@@ -4,6 +4,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { RecordingItem } from "@/lib/types";
 
+const LOCAL_STORAGE_KEY = "recorder-web-history";
+
 function languageLabel(code: RecordingItem["detectedLanguage"]) {
   if (code === "en-US") return "Ingles";
   if (code === "iw-IL") return "Hebreo";
@@ -40,9 +42,18 @@ export default function Home() {
     try {
       const response = await fetch("/api/recordings", { cache: "no-store" });
       const data = (await response.json()) as { recordings: RecordingItem[] };
-      setItems(data.recordings ?? []);
+      const apiRecordings = data.recordings ?? [];
+
+      if (apiRecordings.length > 0) {
+        setItems(apiRecordings);
+        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(apiRecordings));
+      } else {
+        const local = localStorage.getItem(LOCAL_STORAGE_KEY);
+        setItems(local ? (JSON.parse(local) as RecordingItem[]) : []);
+      }
     } catch {
-      setError("No pudimos cargar el historial.");
+      const local = localStorage.getItem(LOCAL_STORAGE_KEY);
+      setItems(local ? (JSON.parse(local) as RecordingItem[]) : []);
     } finally {
       setLoading(false);
     }
@@ -114,7 +125,11 @@ export default function Home() {
         throw new Error(data.error ?? "No se pudo procesar la grabacion.");
       }
 
-      setItems((previous) => [data.recording as RecordingItem, ...previous]);
+      setItems((previous) => {
+        const next = [data.recording as RecordingItem, ...previous];
+        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(next));
+        return next;
+      });
       setSeconds(0);
     } catch (caughtError) {
       setError(
@@ -200,9 +215,17 @@ export default function Home() {
 
                 <div className="audio-stack">
                   <label>Audio original</label>
-                  <audio controls src={item.inputAudioUrl} preload="none" />
+                  <audio
+                    controls
+                    src={item.inputAudioUrl ?? item.inputAudioDataUrl}
+                    preload="none"
+                  />
                   <label>Resumen en audio</label>
-                  <audio controls src={item.summaryAudioUrl} preload="none" />
+                  <audio
+                    controls
+                    src={item.summaryAudioUrl ?? item.summaryAudioDataUrl}
+                    preload="none"
+                  />
                 </div>
 
                 <div className="text-block">

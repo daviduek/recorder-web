@@ -27,8 +27,16 @@ function extensionFromMime(mimeType: string) {
 }
 
 export async function GET() {
-  const recordings = await readRecordings();
-  return NextResponse.json({ recordings });
+  if (process.env.VERCEL) {
+    return NextResponse.json({ recordings: [] });
+  }
+
+  try {
+    const recordings = await readRecordings();
+    return NextResponse.json({ recordings });
+  } catch {
+    return NextResponse.json({ recordings: [] });
+  }
 }
 
 export async function POST(request: Request) {
@@ -50,11 +58,7 @@ export async function POST(request: Request) {
     const id = randomUUID();
     const inputBuffer = Buffer.from(await audio.arrayBuffer());
 
-    const inputAudioUrl = await saveInputAudio(
-      id,
-      extensionFromMime(mimeType),
-      inputBuffer,
-    );
+    const inputAudioDataUrl = `data:${mimeType};base64,${inputBuffer.toString("base64")}`;
 
     const { transcript, detectedLanguage } = await transcribeAudio(
       inputBuffer,
@@ -62,20 +66,36 @@ export async function POST(request: Request) {
     );
     const summary = await summarizeTranscript(transcript);
     const summaryAudioBuffer = await buildSummaryAudio(summary, detectedLanguage);
-    const summaryAudioUrl = await saveSummaryAudio(id, summaryAudioBuffer);
+    const summaryAudioDataUrl = `data:audio/mpeg;base64,${summaryAudioBuffer.toString("base64")}`;
+
+    let inputAudioUrl: string | undefined;
+    let summaryAudioUrl: string | undefined;
+
+    if (!process.env.VERCEL) {
+      inputAudioUrl = await saveInputAudio(
+        id,
+        extensionFromMime(mimeType),
+        inputBuffer,
+      );
+      summaryAudioUrl = await saveSummaryAudio(id, summaryAudioBuffer);
+    }
 
     const recording: RecordingItem = {
       id,
       createdAt: new Date().toISOString(),
       inputAudioUrl,
       summaryAudioUrl,
+      inputAudioDataUrl,
+      summaryAudioDataUrl,
       transcript,
       summary,
       detectedLanguage,
       durationSeconds: Number.isFinite(durationSeconds) ? durationSeconds : 0,
     };
 
-    await appendRecording(recording);
+    if (!process.env.VERCEL) {
+      await appendRecording(recording);
+    }
 
     return NextResponse.json({ recording }, { status: 201 });
   } catch (error) {
