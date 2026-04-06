@@ -134,40 +134,8 @@ async function ensureBucket() {
   return bucketName;
 }
 
-async function ensureBucketCors(bucketName: string) {
-  const bucket = storageClient.bucket(bucketName);
-  const [metadata] = await bucket.getMetadata();
-  const corsRules = metadata.cors ?? [];
-
-  const hasRequiredCors = corsRules.some((rule) => {
-    const origins = rule.origin ?? [];
-    const methods = rule.method ?? [];
-    return origins.includes("*") && methods.includes("PUT");
-  });
-
-  if (hasRequiredCors) {
-    return;
-  }
-
-  try {
-    await bucket.setCorsConfiguration([
-      {
-        origin: ["*"],
-        method: ["PUT", "GET", "POST", "OPTIONS", "HEAD"],
-        responseHeader: ["*"],
-        maxAgeSeconds: 3600,
-      },
-    ]);
-  } catch {
-    throw new Error(
-      `El bucket ${bucketName} no tiene CORS para subida desde navegador. Configura CORS (PUT/GET/POST/OPTIONS) o da permiso storage.buckets.update a la service account.`,
-    );
-  }
-}
-
 export async function createSignedUploadTarget(mimeType: string) {
   const bucketName = await ensureBucket();
-  await ensureBucketCors(bucketName);
   const id = randomUUID();
   const fileName = `recordings/${id}.${extensionFromMime(mimeType)}`;
   const file = storageClient.bucket(bucketName).file(fileName);
