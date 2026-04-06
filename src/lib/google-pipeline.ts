@@ -1,14 +1,18 @@
+import { randomUUID } from "node:crypto";
+
 import { GoogleGenAI } from "@google/genai";
 import speech from "@google-cloud/speech";
+import { Storage } from "@google-cloud/storage";
 import textToSpeech from "@google-cloud/text-to-speech";
 
 import type { SupportedLanguage } from "@/lib/types";
 
-const SPEECH_LANGUAGES: SupportedLanguage[] = ["es-AR", "en-US", "iw-IL"];
+const SPEECH_LANGUAGES: SupportedLanguage[] = ["es-AR", "en-US", "he-IL"];
 
 type GoogleServiceAccount = {
   client_email: string;
   private_key: string;
+  project_id?: string;
 };
 
 function parseInlineCredentials(): GoogleServiceAccount | null {
@@ -28,8 +32,12 @@ function parseInlineCredentials(): GoogleServiceAccount | null {
 }
 
 const inlineCredentials = parseInlineCredentials();
+const projectId =
+  inlineCredentials?.project_id ?? process.env.GOOGLE_CLOUD_PROJECT;
+
 const googleAuthOptions = inlineCredentials
   ? {
+      projectId,
       credentials: {
         client_email: inlineCredentials.client_email,
         private_key: inlineCredentials.private_key,
@@ -41,6 +49,23 @@ const speechClient = new speech.SpeechClient(googleAuthOptions);
 const textToSpeechClient = new textToSpeech.TextToSpeechClient(
   googleAuthOptions,
 );
+const storageClient = new Storage(googleAuthOptions);
+
+function extensionFromMime(mimeType: string) {
+  if (mimeType.includes("webm")) return "webm";
+  if (mimeType.includes("wav")) return "wav";
+  if (mimeType.includes("mpeg") || mimeType.includes("mp3")) return "mp3";
+  if (mimeType.includes("ogg")) return "ogg";
+  return "webm";
+}
+
+function speechEncodingFromMime(mimeType: string) {
+  if (mimeType.includes("webm")) return "WEBM_OPUS";
+  if (mimeType.includes("wav")) return "LINEAR16";
+  if (mimeType.includes("ogg")) return "OGG_OPUS";
+  if (mimeType.includes("mpeg") || mimeType.includes("mp3")) return "MP3";
+  return "ENCODING_UNSPECIFIED";
+}
 
 function normalizeLanguageCode(language: string): "es-AR" | "en-US" | "he-IL" {
   if (language.startsWith("en")) {
@@ -57,7 +82,7 @@ function toSupportedLanguage(language: string): SupportedLanguage | "unknown" {
     return "en-US";
   }
   if (language.startsWith("iw") || language.startsWith("he")) {
-    return "iw-IL";
+    return "he-IL";
   }
   if (language.startsWith("es")) {
     return "es-AR";
@@ -74,26 +99,81 @@ function summarizeFallback(transcript: string) {
   return `Resumen rapido: ${trimmed.slice(0, 600)}${trimmed.length > 600 ? "..." : ""}`;
 }
 
-export async function transcribeAudio(
-  audioBuffer: Buffer,
+async function ensureBucket() {
+  const explicitBucket = process.env.GOOGLE_STORAGE_BUCKET?.trim();
+  let bucketName = explicitBucket;
+
+  if (!bucketName) {
+    if (!projectId) {
+      throw new Error(
+        "Falta GOOGLE_STORAGE_BUCKET (o project_id en credenciales) para procesar audios largos.",
+      );
+    }
+    bucketName = `${projectId}-recorder-web-audio`;
+  }
+
+  const bucket = storageClient.bucket(bucketName);
+  const [exists] = await bucket.exists();
+
+  if (!exists) {
+    if (!projectId) {
+      throw new Error(
+        "No se pudo crear el bucket automaticamente porque falta project_id.",
+      );
+    }
+
+    await storageClient.createBucket(bucketName, {
+      location: process.env.GOOGLE_STORAGE_LOCATION ?? "US",
+      uniformBucketLevelAccess: true,
+    });
+  }
+
+  return bucketName;
+}
+
+export async function createSignedUploadTarget(mimeType: string) {
+  const bucketName = await ensureBucket();
+  const id = randomUUID();
+  const fileName = `recordings/${id}.${extensionFromMime(mimeType)}`;
+  const file = storageClient.bucket(bucketName).file(fileName);
+
+  const [uploadUrl] = await file.getSignedUrl({
+    version: "v4",
+    action: "write",
+    expires: Date.now() + 15 * 60 * 1000,
+    contentType: mimeType,
+  });
+
+  const [downloadUrl] = await file.getSignedUrl({
+    version: "v4",
+    action: "read",
+    expires: Date.now() + 7 * 24 * 60 * 60 * 1000,
+  });
+
+  return {
+    gcsUri: `gs://${bucketName}/${fileName}`,
+    uploadUrl,
+    downloadUrl,
+  };
+}
+
+export async function transcribeFromGcs(
+  gcsUri: string,
   mimeType: string,
 ): Promise<{ transcript: string; detectedLanguage: SupportedLanguage | "unknown" }> {
-  const [response] = await speechClient.recognize({
+  const [operation] = await speechClient.longRunningRecognize({
     config: {
       languageCode: SPEECH_LANGUAGES[0],
       alternativeLanguageCodes: SPEECH_LANGUAGES.slice(1),
       enableAutomaticPunctuation: true,
-      encoding: mimeType.includes("webm")
-        ? "WEBM_OPUS"
-        : mimeType.includes("wav")
-          ? "LINEAR16"
-          : "ENCODING_UNSPECIFIED",
+      encoding: speechEncodingFromMime(mimeType),
     },
     audio: {
-      content: audioBuffer.toString("base64"),
+      uri: gcsUri,
     },
   });
 
+  const [response] = await operation.promise();
   const lines =
     response.results
       ?.map((result) => result.alternatives?.[0]?.transcript?.trim() ?? "")

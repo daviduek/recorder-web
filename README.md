@@ -22,11 +22,14 @@ Copiar `.env.example` a `.env.local` y completar:
 ```bash
 GOOGLE_APPLICATION_CREDENTIALS=C:\path\to\service-account.json
 GOOGLE_CREDENTIALS_JSON=base64_or_json_service_account
+GOOGLE_STORAGE_BUCKET=your-gcs-bucket-name
+GOOGLE_STORAGE_LOCATION=US
 GEMINI_API_KEY=your_google_ai_studio_key
 GEMINI_MODEL=gemini-2.5-flash
 ```
 
 Para deploy (por ejemplo en Vercel), usa `GOOGLE_CREDENTIALS_JSON` con el JSON completo de la service account (o en base64). En local podes seguir usando `GOOGLE_APPLICATION_CREDENTIALS`.
+Tambien defini `GOOGLE_STORAGE_BUCKET` para subir audio largo y poder usar `LongRunningRecognize`.
 
 ## 2) Servicios a habilitar en Google Cloud
 
@@ -59,7 +62,7 @@ Abrir:
 1. El usuario graba desde la web.
 2. Se sube el audio a `/api/recordings`.
 3. Se guarda audio original en `public/uploads`.
-4. Se transcribe con STT (idiomas configurados: `es-AR`, `en-US`, `iw-IL`).
+4. Se transcribe con STT (idiomas configurados: `es-AR`, `en-US`, `he-IL`) usando `LongRunningRecognize`.
 5. Se resume con Gemini.
 6. Se genera audio del resumen con TTS y se guarda en `public/summaries`.
 7. Se guarda registro en `data/recordings.json`.
@@ -67,4 +70,4 @@ Abrir:
 ## Notas
 
 - Si falta `GEMINI_API_KEY`, la app usa un resumen fallback basico para no cortar el flujo.
-- El historial queda local en disco del proyecto (ideal para MVP).
+- En Vercel el historial se mantiene en `localStorage` del navegador.

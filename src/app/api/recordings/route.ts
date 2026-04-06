@@ -5,26 +5,21 @@ import { NextResponse } from "next/server";
 import {
   buildSummaryAudio,
   summarizeTranscript,
-  transcribeAudio,
+  transcribeFromGcs,
 } from "@/lib/google-pipeline";
-import {
-  appendRecording,
-  readRecordings,
-  saveInputAudio,
-  saveSummaryAudio,
-} from "@/lib/recordings-store";
+import { appendRecording, readRecordings } from "@/lib/recordings-store";
 import type { RecordingItem } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 
-function extensionFromMime(mimeType: string) {
-  if (mimeType.includes("webm")) return "webm";
-  if (mimeType.includes("wav")) return "wav";
-  if (mimeType.includes("mpeg") || mimeType.includes("mp3")) return "mp3";
-  if (mimeType.includes("ogg")) return "ogg";
-  return "webm";
-}
+type ProcessRecordingBody = {
+  gcsUri?: string;
+  inputAudioUrl?: string;
+  durationSeconds?: number;
+  mimeType?: string;
+};
 
 export async function GET() {
   if (process.env.VERCEL) {
@@ -41,51 +36,32 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const formData = await request.formData();
-    const audio = formData.get("audio");
-    const durationRaw = formData.get("durationSeconds");
-    const durationSeconds =
-      typeof durationRaw === "string" ? Number(durationRaw) : 0;
+    const body = (await request.json()) as ProcessRecordingBody;
+    const gcsUri = body.gcsUri?.trim();
+    const mimeType = body.mimeType?.trim() || "audio/webm";
+    const durationSeconds = Number(body.durationSeconds ?? 0);
 
-    if (!(audio instanceof File)) {
+    if (!gcsUri) {
       return NextResponse.json(
-        { error: "No se recibio el audio." },
+        { error: "No se recibio el gs:// URI del audio." },
         { status: 400 },
       );
     }
 
-    const mimeType = audio.type || "audio/webm";
     const id = randomUUID();
-    const inputBuffer = Buffer.from(await audio.arrayBuffer());
-
-    const inputAudioDataUrl = `data:${mimeType};base64,${inputBuffer.toString("base64")}`;
-
-    const { transcript, detectedLanguage } = await transcribeAudio(
-      inputBuffer,
+    const { transcript, detectedLanguage } = await transcribeFromGcs(
+      gcsUri,
       mimeType,
     );
     const summary = await summarizeTranscript(transcript);
     const summaryAudioBuffer = await buildSummaryAudio(summary, detectedLanguage);
     const summaryAudioDataUrl = `data:audio/mpeg;base64,${summaryAudioBuffer.toString("base64")}`;
 
-    let inputAudioUrl: string | undefined;
-    let summaryAudioUrl: string | undefined;
-
-    if (!process.env.VERCEL) {
-      inputAudioUrl = await saveInputAudio(
-        id,
-        extensionFromMime(mimeType),
-        inputBuffer,
-      );
-      summaryAudioUrl = await saveSummaryAudio(id, summaryAudioBuffer);
-    }
-
     const recording: RecordingItem = {
       id,
       createdAt: new Date().toISOString(),
-      inputAudioUrl,
-      summaryAudioUrl,
-      inputAudioDataUrl,
+      inputAudioUrl: body.inputAudioUrl,
+      inputAudioStorageUri: gcsUri,
       summaryAudioDataUrl,
       transcript,
       summary,

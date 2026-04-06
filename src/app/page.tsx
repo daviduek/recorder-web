@@ -5,12 +5,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { RecordingItem } from "@/lib/types";
 
 const LOCAL_STORAGE_KEY = "recorder-web-history";
-const RECOMMENDED_RECORDING_SECONDS = 45;
-const MAX_RECORDING_SECONDS = 55;
+const MAX_RECORDING_SECONDS = 1200;
 
 function languageLabel(code: RecordingItem["detectedLanguage"]) {
   if (code === "en-US") return "Ingles";
-  if (code === "iw-IL") return "Hebreo";
+  if (code === "he-IL") return "Hebreo";
   if (code === "es-AR") return "Espanol";
   return "Sin detectar";
 }
@@ -122,13 +121,51 @@ export default function Home() {
 
     try {
       const blob = new Blob(chunksRef.current, { type: "audio/webm" });
-      const formData = new FormData();
-      formData.append("audio", blob, `recording-${Date.now()}.webm`);
-      formData.append("durationSeconds", String(seconds));
+      const prepResponse = await fetch("/api/upload-url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mimeType: blob.type || "audio/webm" }),
+      });
+      const prepData = (await prepResponse.json()) as {
+        error?: string;
+        gcsUri?: string;
+        uploadUrl?: string;
+        downloadUrl?: string;
+        mimeType?: string;
+      };
+
+      if (
+        !prepResponse.ok ||
+        !prepData.gcsUri ||
+        !prepData.uploadUrl ||
+        !prepData.mimeType
+      ) {
+        throw new Error(
+          prepData.error ?? "No se pudo preparar la subida del audio.",
+        );
+      }
+
+      const uploadResponse = await fetch(prepData.uploadUrl, {
+        method: "PUT",
+        headers: {
+          "Content-Type": prepData.mimeType,
+        },
+        body: blob,
+      });
+
+      if (!uploadResponse.ok) {
+        throw new Error("Fallo la subida del audio a Google Cloud Storage.");
+      }
 
       const response = await fetch("/api/recordings", {
         method: "POST",
-        body: formData,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          gcsUri: prepData.gcsUri,
+          inputAudioUrl: prepData.downloadUrl,
+          durationSeconds: seconds,
+          mimeType: prepData.mimeType,
+        }),
       });
       const data = (await response.json()) as {
         error?: string;
@@ -180,8 +217,7 @@ export default function Home() {
             <p className="panel-title">Nueva grabacion</p>
             <p className="status">{statusText}</p>
             <p className="status">
-              Optimo: hasta {RECOMMENDED_RECORDING_SECONDS}s. Maximo automatico:{" "}
-              {MAX_RECORDING_SECONDS}s.
+              Optimo: entre 2 y 10 minutos. Maximo automatico: 20 minutos.
             </p>
           </div>
           <button
@@ -235,7 +271,7 @@ export default function Home() {
                   <label>Audio original</label>
                   <audio
                     controls
-                    src={item.inputAudioUrl ?? item.inputAudioDataUrl}
+                    src={item.inputAudioUrl}
                     preload="none"
                   />
                   <label>Resumen en audio</label>
