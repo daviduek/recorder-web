@@ -2,23 +2,22 @@ import { randomUUID } from "node:crypto";
 
 import { NextResponse } from "next/server";
 
-import {
-  buildSummaryAudio,
-  summarizeTranscript,
-  transcribeFromGcs,
-} from "@/lib/google-pipeline";
 import { appendRecording, readRecordings } from "@/lib/recordings-store";
 import type { RecordingItem } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 300;
 
-type ProcessRecordingBody = {
-  gcsUri?: string;
+type CreateRecordingBody = {
   inputAudioUrl?: string;
+  inputAudioStorageUri?: string;
+  transcript?: string;
+  summary?: string;
+  summaryAudioDataUrl?: string;
+  detectedLanguage?: RecordingItem["detectedLanguage"];
   durationSeconds?: number;
-  mimeType?: string;
+  speakerCount?: number;
+  speakerRoles?: string[];
 };
 
 export async function GET() {
@@ -36,39 +35,30 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as ProcessRecordingBody;
-    const gcsUri = body.gcsUri?.trim();
-    const mimeType = body.mimeType?.trim() || "audio/webm";
-    const durationSeconds = Number(body.durationSeconds ?? 0);
-
-    if (!gcsUri) {
+    const body = (await request.json()) as CreateRecordingBody;
+    if (!body.transcript || !body.summary) {
       return NextResponse.json(
-        { error: "No se recibio el gs:// URI del audio." },
+        { error: "Faltan transcript/summary para guardar la grabacion." },
         { status: 400 },
       );
     }
 
-    const id = randomUUID();
-    const { transcript, detectedLanguage, speakerCount, speakerRoles } = await transcribeFromGcs(
-      gcsUri,
-      mimeType,
-    );
-    const summary = await summarizeTranscript(transcript);
-    const summaryAudioBuffer = await buildSummaryAudio(summary, detectedLanguage);
-    const summaryAudioDataUrl = `data:audio/mpeg;base64,${summaryAudioBuffer.toString("base64")}`;
-
     const recording: RecordingItem = {
-      id,
+      id: randomUUID(),
       createdAt: new Date().toISOString(),
       inputAudioUrl: body.inputAudioUrl,
-      inputAudioStorageUri: gcsUri,
-      summaryAudioDataUrl,
-      transcript,
-      summary,
-      detectedLanguage,
-      speakerCount,
-      speakerRoles,
-      durationSeconds: Number.isFinite(durationSeconds) ? durationSeconds : 0,
+      inputAudioStorageUri: body.inputAudioStorageUri,
+      summaryAudioDataUrl: body.summaryAudioDataUrl,
+      transcript: body.transcript,
+      summary: body.summary,
+      detectedLanguage: body.detectedLanguage ?? "unknown",
+      durationSeconds: Number.isFinite(Number(body.durationSeconds))
+        ? Number(body.durationSeconds)
+        : 0,
+      speakerCount: Math.max(1, Math.min(3, Number(body.speakerCount ?? 1))),
+      speakerRoles: Array.isArray(body.speakerRoles)
+        ? body.speakerRoles.slice(0, 3)
+        : undefined,
     };
 
     if (!process.env.VERCEL) {
@@ -80,8 +70,7 @@ export async function POST(request: Request) {
     const message =
       error instanceof Error
         ? error.message
-        : "No pudimos procesar la grabacion.";
-
+        : "No pudimos guardar la grabacion.";
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

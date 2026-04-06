@@ -39,8 +39,20 @@ type GoogleServiceAccount = {
   project_id?: string;
 };
 
+export type PassSource = "auto" | "es" | "en" | "he";
+
+export type TranscriptionJobOperation = {
+  source: PassSource;
+  operationName: string;
+};
+
+export type TranscriptionJob = {
+  operations: TranscriptionJobOperation[];
+  mimeType: string;
+};
+
 type TranscriptionCandidate = {
-  source: "auto" | "es" | "en" | "he";
+  source: PassSource;
   transcript: string;
   detectedLanguage: SupportedLanguage | "unknown";
   averageConfidence: number;
@@ -100,25 +112,15 @@ function speechEncodingFromMime(mimeType: string) {
 }
 
 function normalizeLanguageCode(language: string): "es-AR" | "en-US" | "he-IL" {
-  if (language.startsWith("en")) {
-    return "en-US";
-  }
-  if (language.startsWith("iw") || language.startsWith("he")) {
-    return "he-IL";
-  }
+  if (language.startsWith("en")) return "en-US";
+  if (language.startsWith("iw") || language.startsWith("he")) return "he-IL";
   return "es-AR";
 }
 
 function toSupportedLanguage(language: string): SupportedLanguage | "unknown" {
-  if (language.startsWith("en")) {
-    return "en-US";
-  }
-  if (language.startsWith("iw") || language.startsWith("he")) {
-    return "iw-IL";
-  }
-  if (language.startsWith("es")) {
-    return "es-AR";
-  }
+  if (language.startsWith("en")) return "en-US";
+  if (language.startsWith("iw") || language.startsWith("he")) return "iw-IL";
+  if (language.startsWith("es")) return "es-AR";
   return "unknown";
 }
 
@@ -130,9 +132,7 @@ function inferLanguageFromTranscript(
   transcript: string,
   detectedFromApi: string,
 ): SupportedLanguage | "unknown" {
-  if (hasHebrewCharacters(transcript)) {
-    return "iw-IL";
-  }
+  if (hasHebrewCharacters(transcript)) return "iw-IL";
   return toSupportedLanguage(detectedFromApi);
 }
 
@@ -141,7 +141,6 @@ function summarizeFallback(transcript: string) {
   if (trimmed.length === 0) {
     return "No se pudo generar resumen porque la transcripcion quedo vacia.";
   }
-
   return `Resumen rapido: ${trimmed.slice(0, 600)}${trimmed.length > 600 ? "..." : ""}`;
 }
 
@@ -217,11 +216,32 @@ function buildTranscriptWithSpeakers(
   };
 }
 
+function passConfig(source: PassSource): {
+  primaryLanguage: SupportedLanguage;
+  alternativeLanguages: SupportedLanguage[];
+} {
+  if (source === "es") return { primaryLanguage: "es-AR", alternativeLanguages: [] };
+  if (source === "en") return { primaryLanguage: "en-US", alternativeLanguages: [] };
+  if (source === "he") return { primaryLanguage: "iw-IL", alternativeLanguages: [] };
+  return {
+    primaryLanguage: "es-AR",
+    alternativeLanguages: ["en-US", "iw-IL"],
+  };
+}
+
+function selectPassSources(durationSeconds: number): PassSource[] {
+  if (durationSeconds >= 45 * 60) {
+    return ["auto", "he"];
+  }
+  if (durationSeconds >= 20 * 60) {
+    return ["auto", "es", "he"];
+  }
+  return ["auto", "es", "en", "he"];
+}
+
 async function ensureBucket() {
   const explicitBucket = process.env.GOOGLE_STORAGE_BUCKET?.trim();
-  if (explicitBucket) {
-    return explicitBucket;
-  }
+  if (explicitBucket) return explicitBucket;
 
   let bucketName = explicitBucket;
   if (!bucketName) {
@@ -235,20 +255,17 @@ async function ensureBucket() {
 
   const bucket = storageClient.bucket(bucketName);
   const [exists] = await bucket.exists();
-
   if (!exists) {
     if (!projectId) {
       throw new Error(
         "No se pudo crear el bucket automaticamente porque falta project_id.",
       );
     }
-
     await storageClient.createBucket(bucketName, {
       location: process.env.GOOGLE_STORAGE_LOCATION ?? "US",
       uniformBucketLevelAccess: true,
     });
   }
-
   return bucketName;
 }
 
@@ -278,25 +295,21 @@ export async function createSignedUploadTarget(mimeType: string) {
   };
 }
 
-async function transcribePass(
-  source: TranscriptionCandidate["source"],
+async function startSinglePassOperation(
+  source: PassSource,
   gcsUri: string,
   mimeType: string,
-  primaryLanguage: SupportedLanguage,
-  alternativeLanguages: SupportedLanguage[] = [],
-): Promise<TranscriptionCandidate> {
+) {
+  const config = passConfig(source);
+
   const [operation] = await speechClient.longRunningRecognize({
     config: {
-      languageCode: primaryLanguage,
-      alternativeLanguageCodes: alternativeLanguages,
+      languageCode: config.primaryLanguage,
+      alternativeLanguageCodes: config.alternativeLanguages,
       enableAutomaticPunctuation: true,
       speechContexts: [
-        {
-          phrases: MIXED_CONTEXT_PHRASES,
-        },
-        {
-          phrases: HEBREW_PHRASES,
-        },
+        { phrases: MIXED_CONTEXT_PHRASES },
+        { phrases: HEBREW_PHRASES },
       ],
       diarizationConfig: {
         enableSpeakerDiarization: true,
@@ -305,21 +318,62 @@ async function transcribePass(
       },
       encoding: speechEncodingFromMime(mimeType),
     },
-    audio: {
-      uri: gcsUri,
-    },
+    audio: { uri: gcsUri },
   });
 
-  const [response] = await operation.promise();
+  const name = operation.latestResponse?.name;
+  if (!name) {
+    throw new Error("No se pudo iniciar la operacion de transcripcion.");
+  }
+
+  return {
+    source,
+    operationName: name,
+  } satisfies TranscriptionJobOperation;
+}
+
+export async function startTranscriptionJob(params: {
+  gcsUri: string;
+  mimeType: string;
+  durationSeconds: number;
+}): Promise<TranscriptionJob> {
+  const sources = selectPassSources(params.durationSeconds);
+  const operations = await Promise.all(
+    sources.map((source) =>
+      startSinglePassOperation(source, params.gcsUri, params.mimeType),
+    ),
+  );
+
+  return {
+    operations,
+    mimeType: params.mimeType,
+  };
+}
+
+function candidateFromResponse(
+  source: PassSource,
+  response: {
+    results?: Array<{
+      languageCode?: string | null;
+      alternatives?: Array<{
+        transcript?: string | null;
+        confidence?: number | null;
+        words?: Array<{ word?: string | null; speakerTag?: number | null }> | null;
+      }> | null;
+    }> | null;
+  },
+): TranscriptionCandidate {
   const results = response.results ?? [];
   const speakerAware = buildTranscriptWithSpeakers(results);
-  const transcript = speakerAware.transcript;
   const detectedFromResult = response.results?.[0]?.languageCode ?? "";
 
   return {
     source,
-    transcript,
-    detectedLanguage: inferLanguageFromTranscript(transcript, detectedFromResult),
+    transcript: speakerAware.transcript,
+    detectedLanguage: inferLanguageFromTranscript(
+      speakerAware.transcript,
+      detectedFromResult,
+    ),
     averageConfidence: getAverageConfidence(results),
     speakerCount: speakerAware.speakerCount,
   };
@@ -342,6 +396,7 @@ async function fuseCandidatesWithLLM(candidates: TranscriptionCandidate[]) {
       source: candidate.source,
       language: candidate.detectedLanguage,
       confidence: Number(candidate.averageConfidence.toFixed(4)),
+      speakerCount: candidate.speakerCount,
       transcript: candidate.transcript,
     }));
 
@@ -354,17 +409,18 @@ async function fuseCandidatesWithLLM(candidates: TranscriptionCandidate[]) {
             {
               text: [
                 "Sos un fusionador experto de ASR multilingue (espanol, ingles, hebreo).",
-                "Te paso 4 hipotesis del mismo audio.",
-                "Objetivo: devolver la mejor transcripcion final, respetando mezcla de idiomas.",
+                "Te paso hipotesis del mismo audio.",
+                "Objetivo: devolver la mejor transcripcion final, respetando mezcla de idiomas y hablantes.",
                 "Reglas:",
                 "1) No inventar contenido.",
                 "2) Priorizar hipotesis con mejor sentido global.",
-                "3) Si una palabra corta hebrea aparece solo en hipotesis he y es coherente, conservarla.",
+                "3) Si una palabra corta hebrea aparece en hipotesis he y es coherente, conservarla.",
                 "4) Mantener hebreo en caracteres hebreos.",
-                "5) No resumir.",
+                "5) Mantener etiquetas de hablante [S1],[S2],[S3].",
+                "6) No resumir.",
                 "",
-                "Devolver JSON estricto con esta forma:",
-                '{"chosenSource":"auto|es|en|he","transcript":"...","detectedLanguage":"es-AR|en-US|iw-IL|unknown"}',
+                "Devolver JSON estricto:",
+                '{"chosenSource":"auto|es|en|he","transcript":"...","detectedLanguage":"es-AR|en-US|iw-IL|unknown","speakerCount":1}',
                 "",
                 "HIPOTESIS:",
                 JSON.stringify(payload),
@@ -373,9 +429,7 @@ async function fuseCandidatesWithLLM(candidates: TranscriptionCandidate[]) {
           ],
         },
       ],
-      config: {
-        temperature: 0.1,
-      },
+      config: { temperature: 0.1 },
     });
 
     const raw = response.text?.trim();
@@ -383,63 +437,83 @@ async function fuseCandidatesWithLLM(candidates: TranscriptionCandidate[]) {
 
     const cleaned = raw.replace(/^```json\s*/i, "").replace(/```$/, "").trim();
     const parsed = JSON.parse(cleaned) as {
-      chosenSource?: "auto" | "es" | "en" | "he";
+      chosenSource?: PassSource;
       transcript?: string;
       detectedLanguage?: SupportedLanguage | "unknown";
+      speakerCount?: number;
     };
 
     const picked = candidates.find((candidate) => candidate.source === parsed.chosenSource);
     const transcript = parsed.transcript?.trim();
-    const detectedLanguage = parsed.detectedLanguage ?? picked?.detectedLanguage ?? "unknown";
+    if (!picked || !transcript) return simpleFusion(candidates);
 
-    if (picked && transcript) {
-      return {
-        ...picked,
-        transcript,
-        detectedLanguage,
-      };
-    }
-
-    return simpleFusion(candidates);
+    return {
+      ...picked,
+      transcript,
+      detectedLanguage: parsed.detectedLanguage ?? picked.detectedLanguage,
+      speakerCount: Math.max(
+        1,
+        Math.min(3, Math.round(parsed.speakerCount ?? picked.speakerCount)),
+      ),
+    };
   } catch {
     return simpleFusion(candidates);
   }
 }
 
-export async function transcribeFromGcs(
-  gcsUri: string,
-  mimeType: string,
-): Promise<{
-  transcript: string;
-  detectedLanguage: SupportedLanguage | "unknown";
-  speakerCount: number;
-  speakerRoles: string[];
-}> {
-  const autoPromise = transcribePass(
-    "auto",
-    gcsUri,
-    mimeType,
-    "es-AR",
-    ["en-US", "iw-IL"],
-  );
-  const esPromise = transcribePass("es", gcsUri, mimeType, "es-AR");
-  const enPromise = transcribePass("en", gcsUri, mimeType, "en-US");
-  const hePromise = transcribePass("he", gcsUri, mimeType, "iw-IL");
-  const candidates = await Promise.all([autoPromise, esPromise, enPromise, hePromise]);
-  const bestCandidate = await fuseCandidatesWithLLM(candidates);
+async function improveTranscriptForReadability(
+  transcript: string,
+  detectedLanguage: SupportedLanguage | "unknown",
+) {
+  const input = transcript.trim();
+  if (!input) return input;
 
-  const polishedTranscript = await improveTranscriptForReadability(
-    bestCandidate.transcript,
-    bestCandidate.detectedLanguage,
-  );
-  const speakerLabeled = await inferSpeakerRoles(polishedTranscript, bestCandidate.speakerCount);
+  if (input.length > 18_000) {
+    return input;
+  }
 
-  return {
-    transcript: speakerLabeled.transcript,
-    detectedLanguage: bestCandidate.detectedLanguage,
-    speakerCount: speakerLabeled.speakerCount,
-    speakerRoles: speakerLabeled.roles,
-  };
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return input;
+
+  try {
+    const ai = new GoogleGenAI({ apiKey });
+    const response = await ai.models.generateContent({
+      model: process.env.GEMINI_MODEL ?? "gemini-2.5-flash",
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              text: [
+                "Mejora esta transcripcion ASR sin inventar informacion.",
+                "Reglas:",
+                "1) Mantener todo el contenido original.",
+                "2) Corregir puntuacion, mayusculas y segmentacion en frases.",
+                "3) Conservar palabras y frases en su idioma original (espanol, ingles, hebreo).",
+                "4) Si hay hebreo, mantenerlo en caracteres hebreos (no transliterar).",
+                "5) Respetar etiquetas de hablante [S1], [S2], [S3].",
+                "6) Resolver frases poco claras usando el contexto de frases cercanas, sin inventar hechos nuevos.",
+                "7) No resumir ni agregar datos.",
+                "",
+                `Idioma detectado aproximado: ${detectedLanguage}`,
+                "",
+                "Devuelve solo el texto final mejorado.",
+                "",
+                "TRANSCRIPCION CRUDA:",
+                input,
+              ].join("\n"),
+            },
+          ],
+        },
+      ],
+      config: { temperature: 0.1 },
+    });
+
+    const output = response.text?.trim();
+    return output && output.length > 0 ? output : input;
+  } catch {
+    return input;
+  }
 }
 
 async function inferSpeakerRoles(transcript: string, speakerCount: number) {
@@ -482,9 +556,7 @@ async function inferSpeakerRoles(transcript: string, speakerCount: number) {
           ],
         },
       ],
-      config: {
-        temperature: 0.1,
-      },
+      config: { temperature: 0.1 },
     });
 
     const raw = response.text?.trim();
@@ -498,18 +570,13 @@ async function inferSpeakerRoles(transcript: string, speakerCount: number) {
 
     const cleaned = raw.replace(/^```json\s*/i, "").replace(/```$/, "").trim();
     const parsed = JSON.parse(cleaned) as { transcript?: string; roles?: string[] };
-    const roleFallback = Array.from(
-      { length: normalizedSpeakerCount },
-      (_, i) => `S${i + 1}`,
-    );
-
     return {
       transcript: parsed.transcript?.trim() || transcript,
       speakerCount: normalizedSpeakerCount,
       roles:
         parsed.roles && parsed.roles.length > 0
           ? parsed.roles.slice(0, 3)
-          : roleFallback,
+          : Array.from({ length: normalizedSpeakerCount }, (_, i) => `S${i + 1}`),
     };
   } catch {
     return {
@@ -520,67 +587,70 @@ async function inferSpeakerRoles(transcript: string, speakerCount: number) {
   }
 }
 
-async function improveTranscriptForReadability(
-  transcript: string,
-  detectedLanguage: SupportedLanguage | "unknown",
-) {
-  const input = transcript.trim();
-  if (!input) return input;
+export async function pollTranscriptionJob(job: TranscriptionJob): Promise<{
+  done: boolean;
+  progress: number;
+  transcript?: string;
+  detectedLanguage?: SupportedLanguage | "unknown";
+  speakerCount?: number;
+  speakerRoles?: string[];
+}> {
+  const candidates: TranscriptionCandidate[] = [];
+  let completed = 0;
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) return input;
+  for (const operationInfo of job.operations) {
+    const operation = await speechClient.checkLongRunningRecognizeProgress(
+      operationInfo.operationName,
+    );
+    const isDone = Boolean(operation.latestResponse?.done);
 
-  try {
-    const ai = new GoogleGenAI({ apiKey });
-    const response = await ai.models.generateContent({
-      model: process.env.GEMINI_MODEL ?? "gemini-2.5-flash",
-      contents: [
-        {
-          role: "user",
-          parts: [
-            {
-              text: [
-                "Mejora esta transcripcion ASR sin inventar informacion.",
-                "Reglas:",
-                "1) Mantener todo el contenido original.",
-                "2) Corregir puntuacion, mayusculas y segmentacion en frases.",
-                "3) Conservar palabras y frases en su idioma original (espanol, ingles, hebreo).",
-                "4) Si hay hebreo, mantenerlo en caracteres hebreos (no transliterar).",
-                "5) Respetar etiquetas de hablante como [S1], [S2], [S3] si existen.",
-                "6) Resolver frases poco claras usando el contexto de frases cercanas, sin inventar hechos nuevos.",
-                "7) No resumir ni agregar datos.",
-                "",
-                `Idioma detectado aproximado: ${detectedLanguage}`,
-                "",
-                "Devuelve solo el texto final mejorado.",
-                "",
-                "TRANSCRIPCION CRUDA:",
-                input,
-              ].join("\n"),
-            },
-          ],
-        },
-      ],
-      config: {
-        temperature: 0.1,
-      },
-    });
+    if (!isDone) {
+      continue;
+    }
 
-    const output = response.text?.trim();
-    return output && output.length > 0 ? output : input;
-  } catch {
-    return input;
+    const [response] = await operation.promise();
+    candidates.push(
+      candidateFromResponse(operationInfo.source, response as Parameters<typeof candidateFromResponse>[1]),
+    );
+    completed += 1;
   }
+
+  if (completed < job.operations.length) {
+    return {
+      done: false,
+      progress: Math.max(
+        5,
+        Math.min(95, Math.round((completed / job.operations.length) * 88 + 5)),
+      ),
+    };
+  }
+
+  const fused = await fuseCandidatesWithLLM(candidates);
+  const polished = await improveTranscriptForReadability(
+    fused.transcript,
+    fused.detectedLanguage,
+  );
+  const roles = await inferSpeakerRoles(polished, fused.speakerCount);
+
+  return {
+    done: true,
+    progress: 100,
+    transcript: roles.transcript,
+    detectedLanguage: fused.detectedLanguage,
+    speakerCount: roles.speakerCount,
+    speakerRoles: roles.roles,
+  };
 }
 
 export async function summarizeTranscript(transcript: string) {
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    return summarizeFallback(transcript);
-  }
+  if (!apiKey) return summarizeFallback(transcript);
 
   try {
     const ai = new GoogleGenAI({ apiKey });
+    const source =
+      transcript.length > 30_000 ? transcript.slice(0, 30_000) : transcript;
+
     const response = await ai.models.generateContent({
       model: process.env.GEMINI_MODEL ?? "gemini-2.5-flash",
       contents: [
@@ -594,15 +664,13 @@ export async function summarizeTranscript(transcript: string) {
                 "Devuelve un resumen en espanol, claro y accionable, maximo 8 lineas.",
                 "",
                 "TRANSCRIPCION:",
-                transcript,
+                source,
               ].join("\n"),
             },
           ],
         },
       ],
-      config: {
-        temperature: 0.2,
-      },
+      config: { temperature: 0.2 },
     });
 
     const text = response.text?.trim();
