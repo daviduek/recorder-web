@@ -5,6 +5,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { RecordingItem } from "@/lib/types";
 
 const LOCAL_STORAGE_KEY = "recorder-web-history";
+const RECOMMENDED_RECORDING_SECONDS = 45;
+const MAX_RECORDING_SECONDS = 55;
 
 function languageLabel(code: RecordingItem["detectedLanguage"]) {
   if (code === "en-US") return "Ingles";
@@ -25,6 +27,7 @@ export default function Home() {
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
+  const autoStoppingRef = useRef(false);
 
   useEffect(() => {
     void loadRecordings();
@@ -79,8 +82,18 @@ export default function Home() {
     mediaRecorder.start();
     setRecording(true);
     setSeconds(0);
+    autoStoppingRef.current = false;
     timerRef.current = window.setInterval(() => {
-      setSeconds((current) => current + 1);
+      setSeconds((current) => {
+        const next = current + 1;
+        if (next >= MAX_RECORDING_SECONDS && !autoStoppingRef.current) {
+          autoStoppingRef.current = true;
+          window.setTimeout(() => {
+            void stopRecording();
+          }, 0);
+        }
+        return next;
+      });
     }, 1000);
   }
 
@@ -105,6 +118,7 @@ export default function Home() {
 
     setRecording(false);
     setProcessing(true);
+    autoStoppingRef.current = false;
 
     try {
       const blob = new Blob(chunksRef.current, { type: "audio/webm" });
@@ -165,6 +179,10 @@ export default function Home() {
           <div>
             <p className="panel-title">Nueva grabacion</p>
             <p className="status">{statusText}</p>
+            <p className="status">
+              Optimo: hasta {RECOMMENDED_RECORDING_SECONDS}s. Maximo automatico:{" "}
+              {MAX_RECORDING_SECONDS}s.
+            </p>
           </div>
           <button
             type="button"

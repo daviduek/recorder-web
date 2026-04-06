@@ -83,7 +83,6 @@ export async function transcribeAudio(
       languageCode: SPEECH_LANGUAGES[0],
       alternativeLanguageCodes: SPEECH_LANGUAGES.slice(1),
       enableAutomaticPunctuation: true,
-      model: "latest_long",
       encoding: mimeType.includes("webm")
         ? "WEBM_OPUS"
         : mimeType.includes("wav")
