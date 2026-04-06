@@ -44,6 +44,7 @@ type TranscriptionCandidate = {
   transcript: string;
   detectedLanguage: SupportedLanguage | "unknown";
   averageConfidence: number;
+  speakerCount: number;
 };
 
 function parseInlineCredentials(): GoogleServiceAccount | null {
@@ -163,7 +164,57 @@ function scoreCandidate(candidate: TranscriptionCandidate) {
   if (hasHebrewCharacters(transcript)) score += 35;
   if (candidate.detectedLanguage === "iw-IL") score += 20;
   if (candidate.source === "he" && hasHebrewCharacters(transcript)) score += 15;
+  if (candidate.speakerCount > 1) score += Math.min(10, candidate.speakerCount * 2);
   return score;
+}
+
+function buildTranscriptWithSpeakers(
+  results: Array<{
+    alternatives?: Array<{
+      transcript?: string | null;
+      words?: Array<{ word?: string | null; speakerTag?: number | null }> | null;
+    }> | null;
+  }>,
+) {
+  const words = results
+    .flatMap((result) => result.alternatives?.[0]?.words ?? [])
+    .filter(Boolean) as Array<{ word?: string | null; speakerTag?: number | null }>;
+
+  if (words.length === 0) {
+    const fallback = results
+      .map((result) => result.alternatives?.[0]?.transcript?.trim() ?? "")
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+    return { transcript: fallback, speakerCount: 1 };
+  }
+
+  const chunks: Array<{ speaker: number; text: string[] }> = [];
+  const uniqueSpeakers = new Set<number>();
+
+  for (const token of words) {
+    const rawWord = token.word?.trim();
+    if (!rawWord) continue;
+    const speaker = Math.max(1, Math.min(3, Number(token.speakerTag ?? 1)));
+    uniqueSpeakers.add(speaker);
+
+    const last = chunks[chunks.length - 1];
+    if (!last || last.speaker !== speaker) {
+      chunks.push({ speaker, text: [rawWord] });
+    } else {
+      last.text.push(rawWord);
+    }
+  }
+
+  const diarized = chunks
+    .map((chunk) => `[S${chunk.speaker}] ${chunk.text.join(" ").trim()}`)
+    .join("\n")
+    .trim();
+
+  return {
+    transcript: diarized,
+    speakerCount: Math.max(1, Math.min(3, uniqueSpeakers.size)),
+  };
 }
 
 async function ensureBucket() {
@@ -247,6 +298,11 @@ async function transcribePass(
           phrases: HEBREW_PHRASES,
         },
       ],
+      diarizationConfig: {
+        enableSpeakerDiarization: true,
+        minSpeakerCount: 1,
+        maxSpeakerCount: 3,
+      },
       encoding: speechEncodingFromMime(mimeType),
     },
     audio: {
@@ -256,11 +312,8 @@ async function transcribePass(
 
   const [response] = await operation.promise();
   const results = response.results ?? [];
-  const lines = results
-    .map((result) => result.alternatives?.[0]?.transcript?.trim() ?? "")
-    .filter(Boolean);
-
-  const transcript = lines.join(" ").trim();
+  const speakerAware = buildTranscriptWithSpeakers(results);
+  const transcript = speakerAware.transcript;
   const detectedFromResult = response.results?.[0]?.languageCode ?? "";
 
   return {
@@ -268,6 +321,7 @@ async function transcribePass(
     transcript,
     detectedLanguage: inferLanguageFromTranscript(transcript, detectedFromResult),
     averageConfidence: getAverageConfidence(results),
+    speakerCount: speakerAware.speakerCount,
   };
 }
 
@@ -355,7 +409,12 @@ async function fuseCandidatesWithLLM(candidates: TranscriptionCandidate[]) {
 export async function transcribeFromGcs(
   gcsUri: string,
   mimeType: string,
-): Promise<{ transcript: string; detectedLanguage: SupportedLanguage | "unknown" }> {
+): Promise<{
+  transcript: string;
+  detectedLanguage: SupportedLanguage | "unknown";
+  speakerCount: number;
+  speakerRoles: string[];
+}> {
   const autoPromise = transcribePass(
     "auto",
     gcsUri,
@@ -373,11 +432,92 @@ export async function transcribeFromGcs(
     bestCandidate.transcript,
     bestCandidate.detectedLanguage,
   );
+  const speakerLabeled = await inferSpeakerRoles(polishedTranscript, bestCandidate.speakerCount);
 
   return {
-    transcript: polishedTranscript,
+    transcript: speakerLabeled.transcript,
     detectedLanguage: bestCandidate.detectedLanguage,
+    speakerCount: speakerLabeled.speakerCount,
+    speakerRoles: speakerLabeled.roles,
   };
+}
+
+async function inferSpeakerRoles(transcript: string, speakerCount: number) {
+  const normalizedSpeakerCount = Math.max(1, Math.min(3, speakerCount));
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey || !transcript.includes("[S")) {
+    return {
+      transcript,
+      speakerCount: normalizedSpeakerCount,
+      roles: Array.from({ length: normalizedSpeakerCount }, (_, i) => `S${i + 1}`),
+    };
+  }
+
+  try {
+    const ai = new GoogleGenAI({ apiKey });
+    const response = await ai.models.generateContent({
+      model: process.env.GEMINI_MODEL ?? "gemini-2.5-flash",
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              text: [
+                "Dado este transcript diarizado con etiquetas [S1], [S2], [S3], inferi roles contextuales.",
+                "Roles validos: ORADOR, PUBLICO, PARTICIPANTE_3.",
+                "Reglas:",
+                "1) No inventar contenido.",
+                "2) Mantener exactamente el texto original; solo reemplazar etiquetas Sx por rol.",
+                "3) Si hay duda, dejar ORADOR/PUBLICO por orden de predominio.",
+                "",
+                `Cantidad de hablantes esperada: ${normalizedSpeakerCount}`,
+                "",
+                "Devolver JSON estricto:",
+                '{"transcript":"...","roles":["ORADOR","PUBLICO"]}',
+                "",
+                "TRANSCRIPT:",
+                transcript,
+              ].join("\n"),
+            },
+          ],
+        },
+      ],
+      config: {
+        temperature: 0.1,
+      },
+    });
+
+    const raw = response.text?.trim();
+    if (!raw) {
+      return {
+        transcript,
+        speakerCount: normalizedSpeakerCount,
+        roles: Array.from({ length: normalizedSpeakerCount }, (_, i) => `S${i + 1}`),
+      };
+    }
+
+    const cleaned = raw.replace(/^```json\s*/i, "").replace(/```$/, "").trim();
+    const parsed = JSON.parse(cleaned) as { transcript?: string; roles?: string[] };
+    const roleFallback = Array.from(
+      { length: normalizedSpeakerCount },
+      (_, i) => `S${i + 1}`,
+    );
+
+    return {
+      transcript: parsed.transcript?.trim() || transcript,
+      speakerCount: normalizedSpeakerCount,
+      roles:
+        parsed.roles && parsed.roles.length > 0
+          ? parsed.roles.slice(0, 3)
+          : roleFallback,
+    };
+  } catch {
+    return {
+      transcript,
+      speakerCount: normalizedSpeakerCount,
+      roles: Array.from({ length: normalizedSpeakerCount }, (_, i) => `S${i + 1}`),
+    };
+  }
 }
 
 async function improveTranscriptForReadability(
@@ -406,8 +546,9 @@ async function improveTranscriptForReadability(
                 "2) Corregir puntuacion, mayusculas y segmentacion en frases.",
                 "3) Conservar palabras y frases en su idioma original (espanol, ingles, hebreo).",
                 "4) Si hay hebreo, mantenerlo en caracteres hebreos (no transliterar).",
-                "5) Resolver frases poco claras usando el contexto de frases cercanas, sin inventar hechos nuevos.",
-                "6) No resumir ni agregar datos.",
+                "5) Respetar etiquetas de hablante como [S1], [S2], [S3] si existen.",
+                "6) Resolver frases poco claras usando el contexto de frases cercanas, sin inventar hechos nuevos.",
+                "7) No resumir ni agregar datos.",
                 "",
                 `Idioma detectado aproximado: ${detectedLanguage}`,
                 "",

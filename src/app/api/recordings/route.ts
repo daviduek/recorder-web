@@ -49,7 +49,7 @@ export async function POST(request: Request) {
     }
 
     const id = randomUUID();
-    const { transcript, detectedLanguage } = await transcribeFromGcs(
+    const { transcript, detectedLanguage, speakerCount, speakerRoles } = await transcribeFromGcs(
       gcsUri,
       mimeType,
     );
@@ -66,6 +66,8 @@ export async function POST(request: Request) {
       transcript,
       summary,
       detectedLanguage,
+      speakerCount,
+      speakerRoles,
       durationSeconds: Number.isFinite(durationSeconds) ? durationSeconds : 0,
     };
 

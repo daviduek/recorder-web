@@ -10,5 +10,7 @@ export type RecordingItem = {
   transcript: string;
   summary: string;
   detectedLanguage: SupportedLanguage | "unknown";
+  speakerCount?: number;
+  speakerRoles?: string[];
   durationSeconds: number;
 };

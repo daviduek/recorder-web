@@ -282,7 +282,8 @@ export default function Home() {
           <h1>Grabador multilenguaje con transcripcion y resumen hablado</h1>
           <p className="subtitle">
             Reconoce espanol, ingles y hebreo. Mejora la transcripcion con
-            contexto conversacional y conserva el idioma original en cada frase.
+            contexto conversacional, conserva el idioma original y detecta hasta
+            3 hablantes con roles contextuales.
           </p>
         </header>
 
@@ -356,6 +357,12 @@ export default function Home() {
 
                 <p className="meta">
                   Duracion: {Math.max(0, Math.round(item.durationSeconds))}s
+                </p>
+                <p className="meta">
+                  Hablantes detectados: {item.speakerCount ?? 1}
+                  {item.speakerRoles && item.speakerRoles.length > 0
+                    ? ` (${item.speakerRoles.join(", ")})`
+                    : ""}
                 </p>
 
                 <div className="audio-stack">
