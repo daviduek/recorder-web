@@ -10,6 +10,7 @@ const SESSION_STORAGE_KEY = "recorder-web-session";
 type TranscriptionJob = {
   operations: Array<{ source: "auto" | "es" | "en" | "he"; operationName: string }>;
   mimeType: string;
+  gcsUri: string;
 };
 
 type AppUser = {
@@ -20,6 +21,11 @@ type AppUser = {
 };
 
 const AUDIO_EXTENSIONS = ["webm", "wav", "mp3", "ogg", "m4a", "aac", "flac"];
+const DEFAULT_SELECTED_LANGUAGES: RecordingItem["detectedLanguages"] = [
+  "es-AR",
+  "en-US",
+  "iw-IL",
+];
 
 function languageLabel(code: RecordingItem["detectedLanguage"]) {
   if (code === "en-US") return "Ingles";
@@ -103,6 +109,18 @@ function saveUsers(users: AppUser[]) {
   localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(users));
 }
 
+function toggleLanguage(
+  current: RecordingItem["detectedLanguages"],
+  language: "es-AR" | "en-US" | "iw-IL",
+) {
+  const hasLanguage = current?.includes(language);
+  if (hasLanguage) {
+    const next = (current ?? []).filter((entry) => entry !== language);
+    return next.length > 0 ? next : current;
+  }
+  return [...(current ?? []), language];
+}
+
 export default function Home() {
   const [items, setItems] = useState<RecordingItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -115,6 +133,9 @@ export default function Home() {
   const [etaSeconds, setEtaSeconds] = useState(0);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [dragActive, setDragActive] = useState(false);
+  const [selectedLanguages, setSelectedLanguages] = useState<
+    RecordingItem["detectedLanguages"]
+  >(DEFAULT_SELECTED_LANGUAGES);
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
 
   const [authEmail, setAuthEmail] = useState("");
@@ -341,6 +362,62 @@ export default function Home() {
     setSeconds(0);
   }
 
+  async function runTranscriptionJob(job: TranscriptionJob) {
+    let done = false;
+    let lastStatus: {
+      transcript?: string;
+      detectedLanguage?: RecordingItem["detectedLanguage"];
+      detectedLanguages?: RecordingItem["detectedLanguages"];
+      speakerCount?: number;
+      speakerRoles?: string[];
+      summary?: string;
+      summaryAudioDataUrl?: string;
+      progress?: number;
+    } = {};
+
+    while (!done) {
+      await new Promise((resolve) => window.setTimeout(resolve, 3500));
+      const statusResponse = await fetch("/api/transcription-jobs/status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job }),
+      });
+      const statusData = (await statusResponse.json()) as {
+        error?: string;
+        done?: boolean;
+        progress?: number;
+        transcript?: string;
+        detectedLanguage?: RecordingItem["detectedLanguage"];
+        detectedLanguages?: RecordingItem["detectedLanguages"];
+        speakerCount?: number;
+        speakerRoles?: string[];
+        summary?: string;
+        summaryAudioDataUrl?: string;
+      };
+
+      if (!statusResponse.ok) {
+        throw new Error(statusData.error ?? "Error consultando estado del procesamiento.");
+      }
+
+      if (!statusData.done) {
+        setStep("Transcribiendo (multi-idioma y hablantes)...", 40);
+        if (typeof statusData.progress === "number") {
+          setProgress((current) => Math.max(current, statusData.progress ?? 0));
+        }
+        continue;
+      }
+
+      done = true;
+      lastStatus = statusData;
+    }
+
+    if (!lastStatus.transcript || !lastStatus.summary) {
+      throw new Error("Finalizo sin transcript/summary. Reintenta con otros idiomas.");
+    }
+
+    return lastStatus;
+  }
+
   async function processAudioBlob(
     blob: Blob,
     durationSeconds: number,
@@ -348,6 +425,10 @@ export default function Home() {
     mimeTypeOverride?: string,
   ) {
     if (!currentUser) return;
+    if (!selectedLanguages || selectedLanguages.length === 0) {
+      setError("Selecciona al menos un idioma (espanol, ingles o hebreo).");
+      return;
+    }
 
     setProcessing(true);
     setError("");
@@ -402,6 +483,7 @@ export default function Home() {
           gcsUri: prepData.gcsUri,
           mimeType: prepData.mimeType,
           durationSeconds,
+          selectedLanguages,
         }),
       });
       const startData = (await startResponse.json()) as {
@@ -412,58 +494,7 @@ export default function Home() {
         throw new Error(startData.error ?? "No se pudo iniciar el procesamiento.");
       }
 
-      let done = false;
-      let lastStatus: {
-        transcript?: string;
-        detectedLanguage?: RecordingItem["detectedLanguage"];
-        detectedLanguages?: RecordingItem["detectedLanguages"];
-        speakerCount?: number;
-        speakerRoles?: string[];
-        summary?: string;
-        summaryAudioDataUrl?: string;
-        progress?: number;
-      } = {};
-
-      while (!done) {
-        await new Promise((resolve) => window.setTimeout(resolve, 3500));
-        const statusResponse = await fetch("/api/transcription-jobs/status", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ job: startData.job }),
-        });
-        const statusData = (await statusResponse.json()) as {
-          error?: string;
-          done?: boolean;
-          progress?: number;
-          transcript?: string;
-          detectedLanguage?: RecordingItem["detectedLanguage"];
-          detectedLanguages?: RecordingItem["detectedLanguages"];
-          speakerCount?: number;
-          speakerRoles?: string[];
-          summary?: string;
-          summaryAudioDataUrl?: string;
-        };
-
-        if (!statusResponse.ok) {
-          throw new Error(statusData.error ?? "Error consultando estado del procesamiento.");
-        }
-
-        if (!statusData.done) {
-          setStep("Transcribiendo (multi-idioma y hablantes)...", 40);
-          if (typeof statusData.progress === "number") {
-            const remoteProgress = statusData.progress;
-            setProgress((current) => Math.max(current, remoteProgress));
-          }
-          continue;
-        }
-
-        done = true;
-        lastStatus = statusData;
-      }
-
-      if (!lastStatus.transcript || !lastStatus.summary) {
-        throw new Error("Finalizo sin transcript/summary. Reintenta con otro audio.");
-      }
+      const lastStatus = await runTranscriptionJob(startData.job);
 
       setStep("Guardando registro final...", 98);
       const saveResponse = await fetch("/api/recordings", {
@@ -511,6 +542,90 @@ export default function Home() {
           ? "Fallo de red/CORS al subir audio. Si persiste, revisamos permisos del bucket de Google Cloud."
           : message,
       );
+      setProgress(0);
+      setProcessingStep("");
+    } finally {
+      stopProgressTimer();
+      setProcessing(false);
+    }
+  }
+
+  async function reprocessRecording(item: RecordingItem) {
+    if (!currentUser) return;
+    if (!item.inputAudioStorageUri) {
+      setError("Esta grabacion no tiene referencia de almacenamiento para re-procesar.");
+      return;
+    }
+    if (!selectedLanguages || selectedLanguages.length === 0) {
+      setError("Selecciona al menos un idioma para re-procesar.");
+      return;
+    }
+
+    setProcessing(true);
+    setError("");
+    startProgressTracking(Math.max(60, Math.round(item.durationSeconds || 60)));
+
+    try {
+      setStep("Reiniciando transcripcion con idiomas seleccionados...", 22);
+      const mimeGuess = item.inputAudioUrl?.toLowerCase().includes(".ogg")
+        ? "audio/ogg"
+        : item.inputAudioUrl?.toLowerCase().includes(".mp3")
+          ? "audio/mpeg"
+          : item.inputAudioUrl?.toLowerCase().includes(".wav")
+            ? "audio/wav"
+            : "audio/webm";
+
+      const startResponse = await fetch("/api/transcription-jobs/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          gcsUri: item.inputAudioStorageUri,
+          mimeType: mimeGuess,
+          durationSeconds: item.durationSeconds,
+          selectedLanguages,
+        }),
+      });
+      const startData = (await startResponse.json()) as {
+        error?: string;
+        job?: TranscriptionJob;
+      };
+      if (!startResponse.ok || !startData.job) {
+        throw new Error(startData.error ?? "No se pudo iniciar el reprocesamiento.");
+      }
+
+      const lastStatus = await runTranscriptionJob(startData.job);
+      setStep("Actualizando resultado...", 96);
+
+      setItems((previous) => {
+        const next = previous.map((entry) =>
+          entry.id === item.id
+            ? {
+                ...entry,
+                transcript: lastStatus.transcript ?? entry.transcript,
+                summary: lastStatus.summary ?? entry.summary,
+                summaryAudioDataUrl:
+                  lastStatus.summaryAudioDataUrl ?? entry.summaryAudioDataUrl,
+                detectedLanguage: lastStatus.detectedLanguage ?? entry.detectedLanguage,
+                detectedLanguages:
+                  lastStatus.detectedLanguages ?? entry.detectedLanguages,
+                speakerCount: lastStatus.speakerCount ?? entry.speakerCount,
+                speakerRoles: lastStatus.speakerRoles ?? entry.speakerRoles,
+              }
+            : entry,
+        );
+        persistUserRecordings(currentUser, next);
+        return next;
+      });
+
+      setProgress(100);
+      setEtaSeconds(0);
+      setProcessingStep("Completado.");
+    } catch (caughtError) {
+      const message =
+        caughtError instanceof Error
+          ? caughtError.message
+          : "No se pudo re-procesar la grabacion.";
+      setError(message);
       setProgress(0);
       setProcessingStep("");
     } finally {
@@ -636,6 +751,42 @@ export default function Home() {
             <p className="status">{statusText}</p>
             <p className="status">Grabacion en vivo: sin limite fijo (detenes cuando quieras).</p>
             <p className="status">Subida de archivo: sin limite fijo; prioridad calidad premium.</p>
+            <p className="status">Idiomas forzados para transcribir:</p>
+            <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap", marginTop: "0.3rem" }}>
+              <label className="chip" style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
+                <input
+                  type="checkbox"
+                  checked={Boolean(selectedLanguages?.includes("es-AR"))}
+                  onChange={() =>
+                    setSelectedLanguages((current) => toggleLanguage(current, "es-AR"))
+                  }
+                  disabled={processing}
+                />
+                Espanol
+              </label>
+              <label className="chip" style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
+                <input
+                  type="checkbox"
+                  checked={Boolean(selectedLanguages?.includes("en-US"))}
+                  onChange={() =>
+                    setSelectedLanguages((current) => toggleLanguage(current, "en-US"))
+                  }
+                  disabled={processing}
+                />
+                Ingles
+              </label>
+              <label className="chip" style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
+                <input
+                  type="checkbox"
+                  checked={Boolean(selectedLanguages?.includes("iw-IL"))}
+                  onChange={() =>
+                    setSelectedLanguages((current) => toggleLanguage(current, "iw-IL"))
+                  }
+                  disabled={processing}
+                />
+                Hebreo
+              </label>
+            </div>
           </div>
           <button
             type="button"
@@ -775,6 +926,14 @@ export default function Home() {
                 <p className="meta">
                   Idiomas detectados: {languageListLabel(item.detectedLanguages)}
                 </p>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => void reprocessRecording(item)}
+                  disabled={processing || !item.inputAudioStorageUri}
+                >
+                  Reprocesar con idiomas seleccionados
+                </button>
 
                 <div className="audio-stack">
                   <label>Audio original</label>

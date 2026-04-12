@@ -263,8 +263,22 @@ function passConfig(source: PassSource): {
   };
 }
 
-function selectPassSources(): PassSource[] {
-  return ["auto", "es", "en", "he"];
+function selectPassSources(selectedLanguages?: SupportedLanguage[]): PassSource[] {
+  const sourceFromLanguage = (language: SupportedLanguage): PassSource => {
+    if (language === "es-AR") return "es";
+    if (language === "en-US") return "en";
+    return "he";
+  };
+
+  const validLanguages =
+    selectedLanguages && selectedLanguages.length > 0
+      ? selectedLanguages
+      : (["es-AR", "en-US", "iw-IL"] as SupportedLanguage[]);
+
+  const manualSources = Array.from(new Set(validLanguages.map(sourceFromLanguage)));
+  if (manualSources.length <= 1) return manualSources;
+
+  return ["auto", ...manualSources];
 }
 
 async function ensureBucket() {
@@ -386,8 +400,9 @@ export async function startTranscriptionJob(params: {
   gcsUri: string;
   mimeType: string;
   durationSeconds: number;
+  selectedLanguages?: SupportedLanguage[];
 }): Promise<TranscriptionJob> {
-  const sources = selectPassSources();
+  const sources = selectPassSources(params.selectedLanguages);
   const operations = await Promise.all(
     sources.map((source) =>
       startSinglePassOperation(source, params.gcsUri, params.mimeType),
@@ -883,13 +898,48 @@ export async function pollTranscriptionJob(job: TranscriptionJob): Promise<{
 }
 
 export async function summarizeTranscript(transcript: string) {
+  const trimmed = transcript.trim();
+  if (!trimmed) return summarizeFallback(transcript);
+
+  if (openaiClient) {
+    try {
+      const response = await openaiClient.responses.create({
+        model: process.env.OPENAI_SUMMARY_MODEL ?? "gpt-4o-mini",
+        input: [
+          {
+            role: "system",
+            content:
+              "Eres un analista experto. Resume conversaciones de audio con foco en contexto, intención, ideas centrales y conclusiones.",
+          },
+          {
+            role: "user",
+            content: [
+              "Devuelve un resumen en español, sin inventar.",
+              "Formato:",
+              "1) Contexto general (1-2 líneas).",
+              "2) Puntos clave (3-6 bullets en una sola línea cada uno).",
+              "3) Cierre/acciones (1-2 líneas).",
+              "",
+              "Transcripción:",
+              trimmed.slice(0, 30000),
+            ].join("\n"),
+          },
+        ],
+      });
+
+      const openaiSummary = (response.output_text ?? "").trim();
+      if (openaiSummary.length > 40) return openaiSummary;
+    } catch {
+      // continue with Gemini fallback
+    }
+  }
+
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return summarizeFallback(transcript);
 
   try {
     const ai = new GoogleGenAI({ apiKey });
-    const source =
-      transcript.length > 30_000 ? transcript.slice(0, 30_000) : transcript;
+    const source = trimmed.length > 30_000 ? trimmed.slice(0, 30_000) : trimmed;
 
     const response = await ai.models.generateContent({
       model: process.env.GEMINI_MODEL ?? "gemini-2.5-flash",
@@ -900,8 +950,12 @@ export async function summarizeTranscript(transcript: string) {
             {
               text: [
                 "Sos un asistente que resume audios multilingues.",
-                "Detecta el idioma principal entre espanol, ingles y hebreo.",
-                "Devuelve un resumen en espanol, claro y accionable, maximo 8 lineas.",
+                "Puede haber espanol, ingles y hebreo en el mismo audio.",
+                "Devuelve un resumen en espanol con contexto real (no parafrasis superficial).",
+                "Formato:",
+                "1) Contexto general (1-2 lineas).",
+                "2) Puntos clave (3-6 bullets, cada uno en una linea).",
+                "3) Cierre/acciones (1-2 lineas).",
                 "",
                 "TRANSCRIPCION:",
                 source,
