@@ -426,6 +426,12 @@ function simpleFusion(candidates: TranscriptionCandidate[]) {
   return ordered[0];
 }
 
+function pickLongestCandidate(candidates: TranscriptionCandidate[]) {
+  return [...candidates].sort(
+    (a, b) => b.transcript.trim().length - a.transcript.trim().length,
+  )[0];
+}
+
 async function fuseCandidatesWithLLM(candidates: TranscriptionCandidate[]) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return simpleFusion(candidates);
@@ -789,20 +795,25 @@ export async function pollTranscriptionJob(job: TranscriptionJob): Promise<{
   }
 
   const fused = await fuseCandidatesWithLLM(candidates);
+  const longest = pickLongestCandidate(candidates);
+  const fusionBase =
+    longest && longest.transcript.trim().length >= fused.transcript.trim().length + 20
+      ? longest
+      : fused;
   const geminiRecovered = await transcribeWithGeminiFallback({
     gcsUri: job.gcsUri,
     mimeType: job.mimeType,
-    currentTranscript: fused.transcript,
+    currentTranscript: fusionBase.transcript,
   });
   const polished = await improveTranscriptForReadability(
     geminiRecovered,
-    fused.detectedLanguage,
+    fusionBase.detectedLanguage,
   );
-  const roles = await inferSpeakerRoles(polished, fused.speakerCount);
+  const roles = await inferSpeakerRoles(polished, fusionBase.speakerCount);
   const detectedLanguages = await inferDetectedLanguages(roles.transcript, candidates);
   const primaryLanguage =
-    fused.detectedLanguage !== "unknown"
-      ? fused.detectedLanguage
+    fusionBase.detectedLanguage !== "unknown"
+      ? fusionBase.detectedLanguage
       : detectedLanguages[0] ?? "unknown";
 
   return {
