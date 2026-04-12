@@ -520,18 +520,28 @@ export default function Home() {
 
           <section className="panel">
             <p className="panel-title">Acceso</p>
-            <input
-              placeholder="Email"
-              value={authEmail}
-              onChange={(event) => setAuthEmail(event.target.value)}
-            />
-            <input
-              type="password"
-              placeholder="Clave"
-              value={authPassword}
-              onChange={(event) => setAuthPassword(event.target.value)}
-              style={{ marginTop: "0.6rem" }}
-            />
+            <div className="auth-fields">
+              <label className="auth-label">
+                <span>Email</span>
+                <input
+                  className="auth-input"
+                  type="email"
+                  placeholder="tu@email.com"
+                  value={authEmail}
+                  onChange={(event) => setAuthEmail(event.target.value)}
+                />
+              </label>
+              <label className="auth-label">
+                <span>Clave</span>
+                <input
+                  className="auth-input"
+                  type="password"
+                  placeholder="******"
+                  value={authPassword}
+                  onChange={(event) => setAuthPassword(event.target.value)}
+                />
+              </label>
+            </div>
             <div style={{ display: "flex", gap: "0.6rem", marginTop: "0.8rem" }}>
               <button
                 type="button"
