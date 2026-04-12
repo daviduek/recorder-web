@@ -20,6 +20,8 @@ type AppUser = {
   passwordHash: string;
 };
 
+const AUDIO_EXTENSIONS = ["webm", "wav", "mp3", "ogg", "m4a", "aac", "flac"];
+
 function languageLabel(code: RecordingItem["detectedLanguage"]) {
   if (code === "en-US") return "Ingles";
   if (code === "iw-IL") return "Hebreo";
@@ -40,6 +42,24 @@ function formatEta(seconds: number) {
 
 function userHistoryKey(userId: string) {
   return `recorder-web-history:${userId}`;
+}
+
+function inferMimeTypeFromName(fileName: string) {
+  const lower = fileName.toLowerCase();
+  if (lower.endsWith(".webm")) return "audio/webm";
+  if (lower.endsWith(".wav")) return "audio/wav";
+  if (lower.endsWith(".mp3")) return "audio/mpeg";
+  if (lower.endsWith(".ogg")) return "audio/ogg";
+  if (lower.endsWith(".m4a")) return "audio/mp4";
+  if (lower.endsWith(".aac")) return "audio/aac";
+  if (lower.endsWith(".flac")) return "audio/flac";
+  return "";
+}
+
+function isAudioFile(file: File) {
+  if (file.type.startsWith("audio/")) return true;
+  const lower = file.name.toLowerCase();
+  return AUDIO_EXTENSIONS.some((extension) => lower.endsWith(`.${extension}`));
 }
 
 async function hashPassword(password: string) {
@@ -90,6 +110,7 @@ export default function Home() {
   const [processingStep, setProcessingStep] = useState("");
   const [etaSeconds, setEtaSeconds] = useState(0);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [dragActive, setDragActive] = useState(false);
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
 
   const [authEmail, setAuthEmail] = useState("");
@@ -324,7 +345,12 @@ export default function Home() {
     setSeconds(0);
   }
 
-  async function processAudioBlob(blob: Blob, durationSeconds: number, filename: string) {
+  async function processAudioBlob(
+    blob: Blob,
+    durationSeconds: number,
+    filename: string,
+    mimeTypeOverride?: string,
+  ) {
     if (!currentUser) return;
 
     setProcessing(true);
@@ -336,7 +362,9 @@ export default function Home() {
       const prepResponse = await fetch("/api/upload-url", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mimeType: blob.type || "audio/webm" }),
+        body: JSON.stringify({
+          mimeType: mimeTypeOverride || blob.type || "audio/webm",
+        }),
       });
       const prepData = (await prepResponse.json()) as {
         error?: string;
@@ -492,12 +520,24 @@ export default function Home() {
 
   async function uploadSelectedFile() {
     if (!selectedFile) {
-      setError("Selecciona un archivo de audio primero.");
+      setError("Selecciona o arrastra un archivo de audio primero.");
       return;
     }
 
+    if (!isAudioFile(selectedFile)) {
+      setError("El archivo debe ser de audio (webm, wav, mp3, ogg, m4a, aac, flac).");
+      return;
+    }
+
+    const resolvedMimeType =
+      selectedFile.type || inferMimeTypeFromName(selectedFile.name) || "audio/webm";
     const assumedSeconds = Math.max(60, Math.round(selectedFile.size / 24_000));
-    await processAudioBlob(selectedFile, assumedSeconds, selectedFile.name);
+    await processAudioBlob(
+      selectedFile,
+      assumedSeconds,
+      selectedFile.name,
+      resolvedMimeType,
+    );
   }
 
   const statusText = useMemo(() => {
@@ -505,6 +545,12 @@ export default function Home() {
     if (recording) return `Grabando ${seconds}s`;
     return "Listo para grabar o subir archivo";
   }, [processing, recording, seconds]);
+
+  const selectedFileLabel = useMemo(() => {
+    if (!selectedFile) return "Ningun archivo seleccionado.";
+    const mb = (selectedFile.size / (1024 * 1024)).toFixed(2);
+    return `${selectedFile.name} (${mb} MB)`;
+  }, [selectedFile]);
 
   if (!currentUser) {
     return (
@@ -626,19 +672,60 @@ export default function Home() {
               conexion y esperar la finalizacion del job.
             </p>
           </div>
-          <input
-            type="file"
-            accept="audio/*"
-            disabled={processing}
-            onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
-          />
+          <div
+            className={`upload-zone ${dragActive ? "active" : ""}`}
+            onDragOver={(event) => {
+              event.preventDefault();
+              if (!processing) setDragActive(true);
+            }}
+            onDragLeave={() => setDragActive(false)}
+            onDrop={(event) => {
+              event.preventDefault();
+              setDragActive(false);
+              if (processing) return;
+              const file = event.dataTransfer.files?.[0] ?? null;
+              if (file && isAudioFile(file)) {
+                setSelectedFile(file);
+                setError("");
+              } else {
+                setError("El archivo debe ser de audio.");
+              }
+            }}
+          >
+            <input
+              id="audio-file-input"
+              className="file-hidden"
+              type="file"
+              accept="audio/*"
+              disabled={processing}
+              onChange={(event) => {
+                const file = event.target.files?.[0] ?? null;
+                if (!file) {
+                  setSelectedFile(null);
+                  return;
+                }
+                if (!isAudioFile(file)) {
+                  setSelectedFile(null);
+                  setError("El archivo debe ser de audio (webm, wav, mp3, ogg, m4a, aac, flac).");
+                  return;
+                }
+                setSelectedFile(file);
+                setError("");
+              }}
+            />
+            <label htmlFor="audio-file-input" className="ghost">
+              Seleccionar archivo
+            </label>
+            <p className="status">{selectedFileLabel}</p>
+            <p className="status">Tambien puedes arrastrar y soltar aqui.</p>
+          </div>
           <button
             type="button"
             className="ghost"
             onClick={() => void uploadSelectedFile()}
             disabled={processing || !selectedFile}
           >
-            Subir y procesar archivo
+            Subir y traducir/transcribir
           </button>
         </section>
 

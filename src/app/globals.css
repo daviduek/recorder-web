@@ -199,6 +199,34 @@ body {
   font-size: 0.86rem;
 }
 
+.upload-zone {
+  width: 100%;
+  border: 1px dashed rgba(27, 28, 29, 0.28);
+  border-radius: 14px;
+  padding: 0.85rem;
+  background: rgba(255, 255, 255, 0.72);
+  display: grid;
+  gap: 0.45rem;
+}
+
+.upload-zone.active {
+  border-color: var(--accent);
+  background: rgba(255, 245, 236, 0.95);
+  box-shadow: 0 0 0 3px rgba(207, 92, 54, 0.14);
+}
+
+.file-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .history-header {
   display: flex;
   align-items: center;
@@ -213,6 +241,11 @@ body {
   padding: 0.5rem 0.95rem;
   font-weight: 600;
   cursor: pointer;
+}
+
+.ghost:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .cards {
