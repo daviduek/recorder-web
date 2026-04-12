@@ -43,11 +43,26 @@ function userHistoryKey(userId: string) {
 }
 
 async function hashPassword(password: string) {
-  const data = new TextEncoder().encode(password);
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
+  try {
+    const subtle = globalThis.crypto?.subtle;
+    if (subtle) {
+      const data = new TextEncoder().encode(password);
+      const digest = await subtle.digest("SHA-256", data);
+      return Array.from(new Uint8Array(digest))
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join("");
+    }
+  } catch {
+    // fallback below
+  }
+
+  // Fallback simple (menos fuerte, pero evita bloqueo de registro/login en navegadores limitados).
+  let hash = 0;
+  for (let index = 0; index < password.length; index += 1) {
+    hash = (hash << 5) - hash + password.charCodeAt(index);
+    hash |= 0;
+  }
+  return `fallback-${Math.abs(hash)}`;
 }
 
 function readUsers(): AppUser[] {
@@ -178,7 +193,8 @@ export default function Home() {
     }
   }
 
-  async function register() {
+async function register() {
+  try {
     setAuthError("");
     if (!authName.trim() || !authEmail.trim() || authPassword.length < 6) {
       setAuthError("Completa nombre/email y clave (minimo 6 caracteres).");
@@ -192,8 +208,13 @@ export default function Home() {
       return;
     }
 
+    const userId =
+      typeof crypto?.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.round(Math.random() * 1_000_000)}`;
+
     const newUser: AppUser = {
-      id: crypto.randomUUID(),
+      id: userId,
       name: authName.trim(),
       email: normalizedEmail,
       passwordHash: await hashPassword(authPassword),
@@ -206,9 +227,15 @@ export default function Home() {
     setAuthName("");
     setAuthEmail("");
     setAuthPassword("");
+  } catch {
+    setAuthError(
+      "No se pudo completar el registro en este navegador. Reintenta y si sigue, usamos login backend.",
+    );
   }
+}
 
-  async function login() {
+async function login() {
+  try {
     setAuthError("");
     const users = readUsers();
     const normalizedEmail = authEmail.trim().toLowerCase();
@@ -227,7 +254,10 @@ export default function Home() {
     setCurrentUser(user);
     setAuthEmail("");
     setAuthPassword("");
+  } catch {
+    setAuthError("No se pudo iniciar sesion. Reintenta.");
   }
+}
 
   function logout() {
     localStorage.removeItem(SESSION_STORAGE_KEY);
