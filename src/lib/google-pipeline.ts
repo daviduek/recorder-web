@@ -49,6 +49,7 @@ export type TranscriptionJobOperation = {
 export type TranscriptionJob = {
   operations: TranscriptionJobOperation[];
   mimeType: string;
+  gcsUri: string;
 };
 
 type TranscriptionCandidate = {
@@ -374,7 +375,19 @@ export async function startTranscriptionJob(params: {
   return {
     operations,
     mimeType: params.mimeType,
+    gcsUri: params.gcsUri,
   };
+}
+
+function parseGcsUri(gcsUri: string) {
+  if (!gcsUri.startsWith("gs://")) return null;
+  const withoutScheme = gcsUri.slice("gs://".length);
+  const slashIndex = withoutScheme.indexOf("/");
+  if (slashIndex <= 0) return null;
+  const bucket = withoutScheme.slice(0, slashIndex);
+  const objectPath = withoutScheme.slice(slashIndex + 1);
+  if (!bucket || !objectPath) return null;
+  return { bucket, objectPath };
 }
 
 function candidateFromResponse(
@@ -673,6 +686,69 @@ async function inferDetectedLanguages(
   return [...detected];
 }
 
+async function transcribeWithGeminiFallback(params: {
+  gcsUri: string;
+  mimeType: string;
+  currentTranscript: string;
+}) {
+  const current = params.currentTranscript.trim();
+  if (current.length >= 40) return current;
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return current;
+
+  const parsed = parseGcsUri(params.gcsUri);
+  if (!parsed) return current;
+
+  try {
+    const file = storageClient.bucket(parsed.bucket).file(parsed.objectPath);
+    const [metadata] = await file.getMetadata();
+    const sizeBytes = Number(metadata.size ?? 0);
+    if (!Number.isFinite(sizeBytes) || sizeBytes <= 0 || sizeBytes > 15 * 1024 * 1024) {
+      return current;
+    }
+
+    const [buffer] = await file.download();
+    if (!buffer || buffer.length === 0) return current;
+
+    const ai = new GoogleGenAI({ apiKey });
+    const response = await ai.models.generateContent({
+      model: process.env.GEMINI_MODEL ?? "gemini-2.5-flash",
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              text: [
+                "Transcribe este audio con maxima fidelidad.",
+                "Puede mezclar espanol, ingles y hebreo en la misma frase.",
+                "Reglas:",
+                "1) No inventar.",
+                "2) Mantener cada idioma en su escritura original.",
+                "3) Si hay dudas, priorizar la opcion mas probable por contexto cercano.",
+                "4) Devolver solo la transcripcion final, sin explicaciones.",
+              ].join("\n"),
+            },
+            {
+              inlineData: {
+                mimeType: params.mimeType || "audio/ogg",
+                data: buffer.toString("base64"),
+              },
+            },
+          ],
+        },
+      ],
+      config: { temperature: 0.1 },
+    });
+
+    const transcript = response.text?.trim() ?? "";
+    if (transcript.length > current.length) return transcript;
+    return current;
+  } catch {
+    return current;
+  }
+}
+
 export async function pollTranscriptionJob(job: TranscriptionJob): Promise<{
   done: boolean;
   progress: number;
@@ -713,8 +789,13 @@ export async function pollTranscriptionJob(job: TranscriptionJob): Promise<{
   }
 
   const fused = await fuseCandidatesWithLLM(candidates);
+  const geminiRecovered = await transcribeWithGeminiFallback({
+    gcsUri: job.gcsUri,
+    mimeType: job.mimeType,
+    currentTranscript: fused.transcript,
+  });
   const polished = await improveTranscriptForReadability(
-    fused.transcript,
+    geminiRecovered,
     fused.detectedLanguage,
   );
   const roles = await inferSpeakerRoles(polished, fused.speakerCount);
