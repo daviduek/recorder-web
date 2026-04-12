@@ -301,35 +301,61 @@ async function startSinglePassOperation(
   mimeType: string,
 ) {
   const config = passConfig(source);
+  const encoding = speechEncodingFromMime(mimeType);
+  const opusFallbackRates =
+    encoding === "OGG_OPUS" || encoding === "WEBM_OPUS"
+      ? [48000, 24000, 16000, 12000, 8000]
+      : [undefined];
 
-  const [operation] = await speechClient.longRunningRecognize({
-    config: {
-      languageCode: config.primaryLanguage,
-      alternativeLanguageCodes: config.alternativeLanguages,
-      enableAutomaticPunctuation: true,
-      speechContexts: [
-        { phrases: MIXED_CONTEXT_PHRASES },
-        { phrases: HEBREW_PHRASES },
-      ],
-      diarizationConfig: {
-        enableSpeakerDiarization: true,
-        minSpeakerCount: 1,
-        maxSpeakerCount: 3,
-      },
-      encoding: speechEncodingFromMime(mimeType),
-    },
-    audio: { uri: gcsUri },
-  });
+  let lastError: unknown = null;
+  for (const sampleRate of opusFallbackRates) {
+    try {
+      const [operation] = await speechClient.longRunningRecognize({
+        config: {
+          languageCode: config.primaryLanguage,
+          alternativeLanguageCodes: config.alternativeLanguages,
+          enableAutomaticPunctuation: true,
+          speechContexts: [
+            { phrases: MIXED_CONTEXT_PHRASES },
+            { phrases: HEBREW_PHRASES },
+          ],
+          diarizationConfig: {
+            enableSpeakerDiarization: true,
+            minSpeakerCount: 1,
+            maxSpeakerCount: 3,
+          },
+          encoding,
+          ...(typeof sampleRate === "number" ? { sampleRateHertz: sampleRate } : {}),
+        },
+        audio: { uri: gcsUri },
+      });
 
-  const name = operation.latestResponse?.name;
-  if (!name) {
-    throw new Error("No se pudo iniciar la operacion de transcripcion.");
+      const name = operation.latestResponse?.name;
+      if (!name) {
+        throw new Error("No se pudo iniciar la operacion de transcripcion.");
+      }
+
+      return {
+        source,
+        operationName: name,
+      } satisfies TranscriptionJobOperation;
+    } catch (error) {
+      lastError = error;
+
+      if (opusFallbackRates.length === 1) break;
+
+      const message =
+        error instanceof Error ? error.message : String(error ?? "");
+      const looksLikeOpusRateError =
+        message.includes("Opus sample rate") || message.includes("INVALID_ARGUMENT");
+      if (!looksLikeOpusRateError) break;
+    }
   }
 
-  return {
-    source,
-    operationName: name,
-  } satisfies TranscriptionJobOperation;
+  if (lastError instanceof Error) {
+    throw lastError;
+  }
+  throw new Error("No se pudo iniciar la operacion de transcripcion.");
 }
 
 export async function startTranscriptionJob(params: {
