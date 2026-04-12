@@ -9,7 +9,6 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 300;
 
 type StatusBody = {
   job?: TranscriptionJob;
@@ -33,7 +32,17 @@ export async function POST(request: Request) {
       });
     }
 
-    const transcript = status.transcript ?? "";
+    const transcript = status.transcript?.trim() ?? "";
+    if (!transcript) {
+      return NextResponse.json(
+        {
+          error:
+            "El audio se proceso pero no se detecto voz suficiente para transcribir. Reintenta con mayor volumen o menos ruido.",
+        },
+        { status: 422 },
+      );
+    }
+
     const detectedLanguage = status.detectedLanguage ?? "unknown";
     const summary = await summarizeTranscript(transcript);
     const summaryAudioBuffer = await buildSummaryAudio(summary, detectedLanguage);

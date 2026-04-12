@@ -6,7 +6,6 @@ import type { RecordingItem } from "@/lib/types";
 
 const USERS_STORAGE_KEY = "recorder-web-users";
 const SESSION_STORAGE_KEY = "recorder-web-session";
-const MAX_RECORDING_SECONDS = 1200;
 
 type TranscriptionJob = {
   operations: Array<{ source: "auto" | "es" | "en" | "he"; operationName: string }>;
@@ -121,7 +120,6 @@ export default function Home() {
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
-  const autoStoppingRef = useRef(false);
   const progressTimerRef = useRef<number | null>(null);
   const processingStartedAtRef = useRef<number>(0);
   const estimatedTotalSecondsRef = useRef<number>(0);
@@ -166,10 +164,7 @@ export default function Home() {
 
   function startProgressTracking(durationSeconds: number) {
     stopProgressTimer();
-    const estimated = Math.max(
-      45,
-      Math.min(70 * 60, Math.round(durationSeconds * 0.9 + 120)),
-    );
+    const estimated = Math.max(45, Math.round(durationSeconds * 1.15 + 120));
     estimatedTotalSecondsRef.current = estimated;
     processingStartedAtRef.current = Date.now();
     setProgress(6);
@@ -285,7 +280,15 @@ export default function Home() {
   }
 
   function persistUserRecordings(user: AppUser, recordings: RecordingItem[]) {
-    localStorage.setItem(userHistoryKey(user.id), JSON.stringify(recordings));
+    try {
+      localStorage.setItem(userHistoryKey(user.id), JSON.stringify(recordings));
+    } catch {
+      const compact = recordings.map((recording) => ({
+        ...recording,
+        summaryAudioDataUrl: undefined,
+      }));
+      localStorage.setItem(userHistoryKey(user.id), JSON.stringify(compact));
+    }
   }
 
   async function startRecording() {
@@ -305,19 +308,8 @@ export default function Home() {
     mediaRecorder.start();
     setRecording(true);
     setSeconds(0);
-    autoStoppingRef.current = false;
-
     timerRef.current = window.setInterval(() => {
-      setSeconds((current) => {
-        const next = current + 1;
-        if (next >= MAX_RECORDING_SECONDS && !autoStoppingRef.current) {
-          autoStoppingRef.current = true;
-          window.setTimeout(() => {
-            void stopRecording();
-          }, 0);
-        }
-        return next;
-      });
+      setSeconds((current) => current + 1);
     }, 1000);
   }
 
@@ -337,7 +329,6 @@ export default function Home() {
     streamRef.current?.getTracks().forEach((track) => track.stop());
 
     setRecording(false);
-    autoStoppingRef.current = false;
 
     const blob = new Blob(chunksRef.current, { type: "audio/webm" });
     chunksRef.current = [];
@@ -635,8 +626,8 @@ export default function Home() {
           <div>
             <p className="panel-title">Nueva grabacion</p>
             <p className="status">{statusText}</p>
-            <p className="status">Grabacion en vivo: maximo automatico 20 minutos.</p>
-            <p className="status">Subida de archivo: hasta 1 hora recomendada.</p>
+            <p className="status">Grabacion en vivo: sin limite fijo (detenes cuando quieras).</p>
+            <p className="status">Subida de archivo: sin limite fijo; prioridad calidad premium.</p>
           </div>
           <button
             type="button"

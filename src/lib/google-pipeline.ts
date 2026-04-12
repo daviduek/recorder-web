@@ -229,13 +229,7 @@ function passConfig(source: PassSource): {
   };
 }
 
-function selectPassSources(durationSeconds: number): PassSource[] {
-  if (durationSeconds >= 45 * 60) {
-    return ["auto", "he"];
-  }
-  if (durationSeconds >= 20 * 60) {
-    return ["auto", "es", "he"];
-  }
+function selectPassSources(): PassSource[] {
   return ["auto", "es", "en", "he"];
 }
 
@@ -363,7 +357,7 @@ export async function startTranscriptionJob(params: {
   mimeType: string;
   durationSeconds: number;
 }): Promise<TranscriptionJob> {
-  const sources = selectPassSources(params.durationSeconds);
+  const sources = selectPassSources();
   const operations = await Promise.all(
     sources.map((source) =>
       startSinglePassOperation(source, params.gcsUri, params.mimeType),
