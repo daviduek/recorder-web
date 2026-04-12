@@ -53,6 +53,7 @@ export type TranscriptionJob = {
   mimeType: string;
   gcsUri: string;
   selectedLanguages?: SupportedLanguage[];
+  mode?: "google" | "openai_direct";
 };
 
 type TranscriptionCandidate = {
@@ -116,6 +117,18 @@ function speechEncodingCandidatesFromMime(mimeType: string) {
   if (mimeType.includes("ogg")) return ["OGG_OPUS", "ENCODING_UNSPECIFIED"] as const;
   if (mimeType.includes("mpeg") || mimeType.includes("mp3")) return ["MP3"] as const;
   return ["ENCODING_UNSPECIFIED"] as const;
+}
+
+function supportsGoogleSpeechLongRunning(mimeType: string) {
+  const lower = mimeType.toLowerCase();
+  return (
+    lower.includes("webm") ||
+    lower.includes("ogg") ||
+    lower.includes("wav") ||
+    lower.includes("mpeg") ||
+    lower.includes("mp3") ||
+    lower.includes("flac")
+  );
 }
 
 function normalizeLanguageCode(language: string): "es-AR" | "en-US" | "he-IL" {
@@ -401,6 +414,16 @@ export async function startTranscriptionJob(params: {
   durationSeconds: number;
   selectedLanguages?: SupportedLanguage[];
 }): Promise<TranscriptionJob> {
+  if (!supportsGoogleSpeechLongRunning(params.mimeType)) {
+    return {
+      operations: [],
+      mimeType: params.mimeType,
+      gcsUri: params.gcsUri,
+      selectedLanguages: params.selectedLanguages,
+      mode: "openai_direct",
+    };
+  }
+
   const sources = selectPassSources(params.selectedLanguages);
   const operations = await Promise.all(
     sources.map((source) =>
@@ -413,6 +436,7 @@ export async function startTranscriptionJob(params: {
     mimeType: params.mimeType,
     gcsUri: params.gcsUri,
     selectedLanguages: params.selectedLanguages,
+    mode: "google",
   };
 }
 
@@ -731,14 +755,14 @@ async function inferDetectedLanguages(
   return [...detected];
 }
 
-async function loadAudioBufferForFallback(gcsUri: string) {
+async function loadAudioBufferForFallback(gcsUri: string, maxBytes = 24 * 1024 * 1024) {
   const parsed = parseGcsUri(gcsUri);
   if (!parsed) return null;
 
   const file = storageClient.bucket(parsed.bucket).file(parsed.objectPath);
   const [metadata] = await file.getMetadata();
   const sizeBytes = Number(metadata.size ?? 0);
-  if (!Number.isFinite(sizeBytes) || sizeBytes <= 0 || sizeBytes > 15 * 1024 * 1024) {
+  if (!Number.isFinite(sizeBytes) || sizeBytes <= 0 || sizeBytes > maxBytes) {
     return null;
   }
 
@@ -752,16 +776,17 @@ async function transcribeWithPremiumFallback(params: {
   mimeType: string;
   currentTranscript: string;
   selectedLanguages?: SupportedLanguage[];
+  forceFullTranscription?: boolean;
 }) {
   const current = params.currentTranscript.trim();
   const requiresHebrew =
     params.selectedLanguages?.includes("iw-IL") &&
     !hasHebrewCharacters(current);
-  if (current.length >= 40 && !requiresHebrew) return current;
+  if (!params.forceFullTranscription && current.length >= 40 && !requiresHebrew) return current;
 
   let buffer: Buffer | null = null;
   try {
-    buffer = await loadAudioBufferForFallback(params.gcsUri);
+    buffer = await loadAudioBufferForFallback(params.gcsUri, 24 * 1024 * 1024);
   } catch {
     buffer = null;
   }
@@ -852,6 +877,42 @@ export async function pollTranscriptionJob(job: TranscriptionJob): Promise<{
   speakerCount?: number;
   speakerRoles?: string[];
 }> {
+  if (job.mode === "openai_direct") {
+    const transcript = await transcribeWithPremiumFallback({
+      gcsUri: job.gcsUri,
+      mimeType: job.mimeType,
+      currentTranscript: "",
+      selectedLanguages: job.selectedLanguages,
+      forceFullTranscription: true,
+    });
+
+    const cleaned = transcript.trim();
+    if (!cleaned) {
+      throw new Error(
+        "No se pudo transcribir este archivo subido. Si es muy grande o formato no compatible, converti a mp3/wav/ogg/webm e intenta de nuevo.",
+      );
+    }
+
+    const detectedLanguagesRaw = await inferDetectedLanguages(cleaned, []);
+    const detectedLanguages =
+      job.selectedLanguages && job.selectedLanguages.length > 0
+        ? detectedLanguagesRaw.filter((language) =>
+            job.selectedLanguages?.includes(language),
+          )
+        : detectedLanguagesRaw;
+    const detectedLanguage = detectedLanguages[0] ?? job.selectedLanguages?.[0] ?? "unknown";
+
+    return {
+      done: true,
+      progress: 100,
+      transcript: cleaned,
+      detectedLanguage,
+      detectedLanguages,
+      speakerCount: 1,
+      speakerRoles: ["S1"],
+    };
+  }
+
   const candidates: TranscriptionCandidate[] = [];
   let completed = 0;
 

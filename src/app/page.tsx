@@ -11,6 +11,7 @@ type TranscriptionJob = {
   operations: Array<{ source: "auto" | "es" | "en" | "he"; operationName: string }>;
   mimeType: string;
   gcsUri: string;
+  mode?: "google" | "openai_direct";
 };
 
 type AppUser = {

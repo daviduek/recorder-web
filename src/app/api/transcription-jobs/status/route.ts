@@ -17,7 +17,16 @@ type StatusBody = {
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as StatusBody;
-    if (!body.job || !Array.isArray(body.job.operations) || body.job.operations.length === 0) {
+    if (!body.job) {
+      return NextResponse.json(
+        { error: "Job invalido para consultar estado." },
+        { status: 400 },
+      );
+    }
+    if (
+      body.job.mode !== "openai_direct" &&
+      (!Array.isArray(body.job.operations) || body.job.operations.length === 0)
+    ) {
       return NextResponse.json(
         { error: "Job invalido para consultar estado." },
         { status: 400 },
