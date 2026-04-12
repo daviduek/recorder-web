@@ -388,12 +388,14 @@ export default function Home() {
         method: "PUT",
         headers: {
           "Content-Type": prepData.mimeType,
-          "x-goog-meta-filename": encodeURIComponent(filename),
         },
         body: blob,
       });
       if (!uploadResponse.ok) {
-        throw new Error("Fallo la subida del audio a Google Cloud Storage.");
+        const uploadErrorBody = await uploadResponse.text().catch(() => "");
+        throw new Error(
+          `Fallo la subida a Google Cloud Storage (${uploadResponse.status}). ${uploadErrorBody.slice(0, 220)}`,
+        );
       }
 
       setStep("Iniciando transcripcion de larga duracion...", 34);
