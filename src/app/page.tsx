@@ -4,12 +4,20 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { RecordingItem } from "@/lib/types";
 
-const LOCAL_STORAGE_KEY = "recorder-web-history";
+const USERS_STORAGE_KEY = "recorder-web-users";
+const SESSION_STORAGE_KEY = "recorder-web-session";
 const MAX_RECORDING_SECONDS = 1200;
 
 type TranscriptionJob = {
   operations: Array<{ source: "auto" | "es" | "en" | "he"; operationName: string }>;
   mimeType: string;
+};
+
+type AppUser = {
+  id: string;
+  name: string;
+  email: string;
+  passwordHash: string;
 };
 
 function languageLabel(code: RecordingItem["detectedLanguage"]) {
@@ -30,6 +38,33 @@ function formatEta(seconds: number) {
   return `${minutes}:${remaining}`;
 }
 
+function userHistoryKey(userId: string) {
+  return `recorder-web-history:${userId}`;
+}
+
+async function hashPassword(password: string) {
+  const data = new TextEncoder().encode(password);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function readUsers(): AppUser[] {
+  const raw = localStorage.getItem(USERS_STORAGE_KEY);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as AppUser[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveUsers(users: AppUser[]) {
+  localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(users));
+}
+
 export default function Home() {
   const [items, setItems] = useState<RecordingItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -41,6 +76,13 @@ export default function Home() {
   const [processingStep, setProcessingStep] = useState("");
   const [etaSeconds, setEtaSeconds] = useState(0);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
+
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [authName, setAuthName] = useState("");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authError, setAuthError] = useState("");
 
   const timerRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -52,13 +94,30 @@ export default function Home() {
   const estimatedTotalSecondsRef = useRef<number>(0);
 
   useEffect(() => {
-    void loadRecordings();
+    const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+    if (raw) {
+      try {
+        const user = JSON.parse(raw) as AppUser;
+        setCurrentUser(user);
+      } catch {
+        localStorage.removeItem(SESSION_STORAGE_KEY);
+      }
+    }
+    setLoading(false);
     return () => {
       if (timerRef.current) window.clearInterval(timerRef.current);
       if (progressTimerRef.current) window.clearInterval(progressTimerRef.current);
       streamRef.current?.getTracks().forEach((track) => track.stop());
     };
   }, []);
+
+  useEffect(() => {
+    if (!currentUser) {
+      setItems([]);
+      return;
+    }
+    void loadRecordings(currentUser);
+  }, [currentUser]);
 
   function stopProgressTimer() {
     if (progressTimerRef.current) {
@@ -97,7 +156,7 @@ export default function Home() {
     }, 1000);
   }
 
-  async function loadRecordings() {
+  async function loadRecordings(user: AppUser) {
     setLoading(true);
     setError("");
     try {
@@ -107,20 +166,83 @@ export default function Home() {
 
       if (apiRecordings.length > 0) {
         setItems(apiRecordings);
-        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(apiRecordings));
       } else {
-        const local = localStorage.getItem(LOCAL_STORAGE_KEY);
+        const local = localStorage.getItem(userHistoryKey(user.id));
         setItems(local ? (JSON.parse(local) as RecordingItem[]) : []);
       }
     } catch {
-      const local = localStorage.getItem(LOCAL_STORAGE_KEY);
+      const local = localStorage.getItem(userHistoryKey(user.id));
       setItems(local ? (JSON.parse(local) as RecordingItem[]) : []);
     } finally {
       setLoading(false);
     }
   }
 
+  async function register() {
+    setAuthError("");
+    if (!authName.trim() || !authEmail.trim() || authPassword.length < 6) {
+      setAuthError("Completa nombre/email y clave (minimo 6 caracteres).");
+      return;
+    }
+
+    const users = readUsers();
+    const normalizedEmail = authEmail.trim().toLowerCase();
+    if (users.some((user) => user.email === normalizedEmail)) {
+      setAuthError("Ese email ya está registrado.");
+      return;
+    }
+
+    const newUser: AppUser = {
+      id: crypto.randomUUID(),
+      name: authName.trim(),
+      email: normalizedEmail,
+      passwordHash: await hashPassword(authPassword),
+    };
+
+    users.push(newUser);
+    saveUsers(users);
+    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(newUser));
+    setCurrentUser(newUser);
+    setAuthName("");
+    setAuthEmail("");
+    setAuthPassword("");
+  }
+
+  async function login() {
+    setAuthError("");
+    const users = readUsers();
+    const normalizedEmail = authEmail.trim().toLowerCase();
+    const hash = await hashPassword(authPassword);
+    const user = users.find(
+      (entry) =>
+        entry.email === normalizedEmail && entry.passwordHash === hash,
+    );
+
+    if (!user) {
+      setAuthError("Credenciales invalidas.");
+      return;
+    }
+
+    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(user));
+    setCurrentUser(user);
+    setAuthEmail("");
+    setAuthPassword("");
+  }
+
+  function logout() {
+    localStorage.removeItem(SESSION_STORAGE_KEY);
+    setCurrentUser(null);
+    setItems([]);
+    setSelectedFile(null);
+    setError("");
+  }
+
+  function persistUserRecordings(user: AppUser, recordings: RecordingItem[]) {
+    localStorage.setItem(userHistoryKey(user.id), JSON.stringify(recordings));
+  }
+
   async function startRecording() {
+    if (!currentUser) return;
     setError("");
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
@@ -153,7 +275,7 @@ export default function Home() {
   }
 
   async function stopRecording() {
-    if (!recorderRef.current) return;
+    if (!currentUser || !recorderRef.current) return;
 
     await new Promise<void>((resolve) => {
       if (!recorderRef.current) {
@@ -177,6 +299,8 @@ export default function Home() {
   }
 
   async function processAudioBlob(blob: Blob, durationSeconds: number, filename: string) {
+    if (!currentUser) return;
+
     setProcessing(true);
     setError("");
     startProgressTracking(durationSeconds);
@@ -314,7 +438,7 @@ export default function Home() {
 
       setItems((previous) => {
         const next = [saveData.recording as RecordingItem, ...previous];
-        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(next));
+        persistUserRecordings(currentUser, next);
         return next;
       });
 
@@ -346,7 +470,7 @@ export default function Home() {
       return;
     }
 
-    const assumedSeconds = Math.max(60, Math.round(selectedFile.size / (24_000)));
+    const assumedSeconds = Math.max(60, Math.round(selectedFile.size / 24_000));
     await processAudioBlob(selectedFile, assumedSeconds, selectedFile.name);
   }
 
@@ -356,6 +480,67 @@ export default function Home() {
     return "Listo para grabar o subir archivo";
   }, [processing, recording, seconds]);
 
+  if (!currentUser) {
+    return (
+      <div className="app-shell">
+        <main className="studio">
+          <header className="hero">
+            <p className="eyebrow">Audio Journal</p>
+            <h1>Registrate para guardar tus grabaciones por usuario</h1>
+            <p className="subtitle">
+              Cada cuenta mantiene su historial separado en esta app.
+            </p>
+          </header>
+
+          <section className="panel">
+            <p className="panel-title">
+              {authMode === "login" ? "Iniciar sesion" : "Crear cuenta"}
+            </p>
+            {authMode === "register" ? (
+              <input
+                placeholder="Nombre"
+                value={authName}
+                onChange={(event) => setAuthName(event.target.value)}
+              />
+            ) : null}
+            <input
+              placeholder="Email"
+              value={authEmail}
+              onChange={(event) => setAuthEmail(event.target.value)}
+              style={{ marginTop: "0.6rem" }}
+            />
+            <input
+              type="password"
+              placeholder="Clave"
+              value={authPassword}
+              onChange={(event) => setAuthPassword(event.target.value)}
+              style={{ marginTop: "0.6rem" }}
+            />
+            <div style={{ display: "flex", gap: "0.6rem", marginTop: "0.8rem" }}>
+              <button
+                type="button"
+                className="record-button"
+                onClick={() => void (authMode === "login" ? login() : register())}
+              >
+                {authMode === "login" ? "Entrar" : "Registrarme"}
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() =>
+                  setAuthMode((mode) => (mode === "login" ? "register" : "login"))
+                }
+              >
+                {authMode === "login" ? "Quiero crear cuenta" : "Ya tengo cuenta"}
+              </button>
+            </div>
+            {authError ? <p className="error" style={{ marginTop: "0.8rem" }}>{authError}</p> : null}
+          </section>
+        </main>
+      </div>
+    );
+  }
+
   return (
     <div className="app-shell">
       <main className="studio">
@@ -363,9 +548,11 @@ export default function Home() {
           <p className="eyebrow">Audio Journal</p>
           <h1>Grabador multilenguaje con transcripcion y resumen hablado</h1>
           <p className="subtitle">
-            Soporta grabacion directa y subida de archivos de audio largos (hasta
-            1 hora). Detecta hasta 3 hablantes y mezcla espanol, ingles y hebreo.
+            Sesion activa: {currentUser.name} ({currentUser.email})
           </p>
+          <button type="button" className="ghost" onClick={logout}>
+            Cerrar sesion
+          </button>
         </header>
 
         <section className="panel controls">
@@ -415,10 +602,7 @@ export default function Home() {
             type="file"
             accept="audio/*"
             disabled={processing}
-            onChange={(event) => {
-              const file = event.target.files?.[0] ?? null;
-              setSelectedFile(file);
-            }}
+            onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
           />
           <button
             type="button"
@@ -436,7 +620,7 @@ export default function Home() {
             <button
               type="button"
               className="ghost"
-              onClick={() => void loadRecordings()}
+              onClick={() => void loadRecordings(currentUser)}
               disabled={loading}
             >
               Actualizar
@@ -446,8 +630,7 @@ export default function Home() {
           {loading ? <p className="empty">Cargando historial...</p> : null}
           {!loading && items.length === 0 ? (
             <p className="empty">
-              Todavia no hay grabaciones. Hace la primera para iniciar el
-              registro.
+              Todavia no hay grabaciones para este usuario.
             </p>
           ) : null}
 
