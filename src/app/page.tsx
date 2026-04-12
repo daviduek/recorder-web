@@ -56,7 +56,6 @@ async function hashPassword(password: string) {
     // fallback below
   }
 
-  // Fallback simple (menos fuerte, pero evita bloqueo de registro/login en navegadores limitados).
   let hash = 0;
   for (let index = 0; index < password.length; index += 1) {
     hash = (hash << 5) - hash + password.charCodeAt(index);
@@ -93,8 +92,6 @@ export default function Home() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
 
-  const [authMode, setAuthMode] = useState<"login" | "register">("login");
-  const [authName, setAuthName] = useState("");
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
   const [authError, setAuthError] = useState("");
@@ -193,71 +190,70 @@ export default function Home() {
     }
   }
 
-async function register() {
-  try {
-    setAuthError("");
-    if (!authName.trim() || !authEmail.trim() || authPassword.length < 6) {
-      setAuthError("Completa nombre/email y clave (minimo 6 caracteres).");
-      return;
+  async function createAccount() {
+    try {
+      setAuthError("");
+      if (!authEmail.trim() || authPassword.length < 6) {
+        setAuthError("Completa email y clave (minimo 6 caracteres).");
+        return;
+      }
+
+      const users = readUsers();
+      const normalizedEmail = authEmail.trim().toLowerCase();
+      if (users.some((user) => user.email === normalizedEmail)) {
+        setAuthError("Ese email ya esta registrado. Usa Ingresar.");
+        return;
+      }
+
+      const userId =
+        typeof crypto?.randomUUID === "function"
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.round(Math.random() * 1_000_000)}`;
+
+      const newUser: AppUser = {
+        id: userId,
+        name: normalizedEmail.split("@")[0] || "usuario",
+        email: normalizedEmail,
+        passwordHash: await hashPassword(authPassword),
+      };
+
+      users.push(newUser);
+      saveUsers(users);
+      localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(newUser));
+      setCurrentUser(newUser);
+      setAuthEmail("");
+      setAuthPassword("");
+    } catch {
+      setAuthError(
+        "No se pudo completar el registro en este navegador. Reintenta.",
+      );
     }
-
-    const users = readUsers();
-    const normalizedEmail = authEmail.trim().toLowerCase();
-    if (users.some((user) => user.email === normalizedEmail)) {
-      setAuthError("Ese email ya está registrado.");
-      return;
-    }
-
-    const userId =
-      typeof crypto?.randomUUID === "function"
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.round(Math.random() * 1_000_000)}`;
-
-    const newUser: AppUser = {
-      id: userId,
-      name: authName.trim(),
-      email: normalizedEmail,
-      passwordHash: await hashPassword(authPassword),
-    };
-
-    users.push(newUser);
-    saveUsers(users);
-    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(newUser));
-    setCurrentUser(newUser);
-    setAuthName("");
-    setAuthEmail("");
-    setAuthPassword("");
-  } catch {
-    setAuthError(
-      "No se pudo completar el registro en este navegador. Reintenta y si sigue, usamos login backend.",
-    );
   }
-}
 
-async function login() {
-  try {
-    setAuthError("");
-    const users = readUsers();
-    const normalizedEmail = authEmail.trim().toLowerCase();
-    const hash = await hashPassword(authPassword);
-    const user = users.find(
-      (entry) =>
-        entry.email === normalizedEmail && entry.passwordHash === hash,
-    );
+  async function login() {
+    try {
+      setAuthError("");
+      const users = readUsers();
+      const normalizedEmail = authEmail.trim().toLowerCase();
+      const hash = await hashPassword(authPassword);
+      const user = users.find(
+        (entry) =>
+          entry.email === normalizedEmail && entry.passwordHash === hash,
+      );
 
-    if (!user) {
-      setAuthError("Credenciales invalidas.");
-      return;
+      if (!user) {
+        setAuthError("Credenciales invalidas.");
+        return;
+      }
+
+      localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(user));
+      setCurrentUser(user);
+      setAuthEmail("");
+      setAuthPassword("");
+    } catch {
+      setAuthError("No se pudo iniciar sesion. Reintenta.");
     }
-
-    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(user));
-    setCurrentUser(user);
-    setAuthEmail("");
-    setAuthPassword("");
-  } catch {
-    setAuthError("No se pudo iniciar sesion. Reintenta.");
   }
-}
 
   function logout() {
     localStorage.removeItem(SESSION_STORAGE_KEY);
@@ -516,28 +512,18 @@ async function login() {
         <main className="studio">
           <header className="hero">
             <p className="eyebrow">Audio Journal</p>
-            <h1>Registrate para guardar tus grabaciones por usuario</h1>
+            <h1>Accede con email y clave</h1>
             <p className="subtitle">
-              Cada cuenta mantiene su historial separado en esta app.
+              Crea cuenta o inicia sesion. Cada usuario ve solo sus grabaciones.
             </p>
           </header>
 
           <section className="panel">
-            <p className="panel-title">
-              {authMode === "login" ? "Iniciar sesion" : "Crear cuenta"}
-            </p>
-            {authMode === "register" ? (
-              <input
-                placeholder="Nombre"
-                value={authName}
-                onChange={(event) => setAuthName(event.target.value)}
-              />
-            ) : null}
+            <p className="panel-title">Acceso</p>
             <input
               placeholder="Email"
               value={authEmail}
               onChange={(event) => setAuthEmail(event.target.value)}
-              style={{ marginTop: "0.6rem" }}
             />
             <input
               type="password"
@@ -550,21 +536,23 @@ async function login() {
               <button
                 type="button"
                 className="record-button"
-                onClick={() => void (authMode === "login" ? login() : register())}
+                onClick={() => void createAccount()}
               >
-                {authMode === "login" ? "Entrar" : "Registrarme"}
+                Crear cuenta
               </button>
               <button
                 type="button"
                 className="ghost"
-                onClick={() =>
-                  setAuthMode((mode) => (mode === "login" ? "register" : "login"))
-                }
+                onClick={() => void login()}
               >
-                {authMode === "login" ? "Quiero crear cuenta" : "Ya tengo cuenta"}
+                Ingresar
               </button>
             </div>
-            {authError ? <p className="error" style={{ marginTop: "0.8rem" }}>{authError}</p> : null}
+            {authError ? (
+              <p className="error" style={{ marginTop: "0.8rem" }}>
+                {authError}
+              </p>
+            ) : null}
           </section>
         </main>
       </div>
