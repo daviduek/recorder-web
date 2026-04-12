@@ -4,6 +4,8 @@ import { GoogleGenAI } from "@google/genai";
 import speech from "@google-cloud/speech";
 import { Storage } from "@google-cloud/storage";
 import textToSpeech from "@google-cloud/text-to-speech";
+import OpenAI from "openai";
+import { toFile } from "openai/uploads";
 
 import type { SupportedLanguage } from "@/lib/types";
 
@@ -95,6 +97,9 @@ const textToSpeechClient = new textToSpeech.TextToSpeechClient(
   googleAuthOptions,
 );
 const storageClient = new Storage(googleAuthOptions);
+const openaiClient = process.env.OPENAI_API_KEY
+  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+  : null;
 
 function extensionFromMime(mimeType: string) {
   if (mimeType.includes("webm")) return "webm";
@@ -692,7 +697,23 @@ async function inferDetectedLanguages(
   return [...detected];
 }
 
-async function transcribeWithGeminiFallback(params: {
+async function loadAudioBufferForFallback(gcsUri: string) {
+  const parsed = parseGcsUri(gcsUri);
+  if (!parsed) return null;
+
+  const file = storageClient.bucket(parsed.bucket).file(parsed.objectPath);
+  const [metadata] = await file.getMetadata();
+  const sizeBytes = Number(metadata.size ?? 0);
+  if (!Number.isFinite(sizeBytes) || sizeBytes <= 0 || sizeBytes > 15 * 1024 * 1024) {
+    return null;
+  }
+
+  const [buffer] = await file.download();
+  if (!buffer || buffer.length === 0) return null;
+  return buffer;
+}
+
+async function transcribeWithPremiumFallback(params: {
   gcsUri: string;
   mimeType: string;
   currentTranscript: string;
@@ -700,23 +721,38 @@ async function transcribeWithGeminiFallback(params: {
   const current = params.currentTranscript.trim();
   if (current.length >= 40) return current;
 
+  let buffer: Buffer | null = null;
+  try {
+    buffer = await loadAudioBufferForFallback(params.gcsUri);
+  } catch {
+    buffer = null;
+  }
+  if (!buffer) return current;
+
+  if (openaiClient) {
+    try {
+      const file = await toFile(
+        buffer,
+        `fallback.${extensionFromMime(params.mimeType || "audio/ogg")}`,
+        { type: params.mimeType || "audio/ogg" },
+      );
+      const response = await openaiClient.audio.transcriptions.create({
+        model: process.env.OPENAI_TRANSCRIBE_MODEL ?? "gpt-4o-transcribe",
+        file,
+        prompt:
+          "The audio may mix Spanish, English, and Hebrew. Transcribe faithfully and preserve each language.",
+      });
+      const openaiTranscript = response.text?.trim() ?? "";
+      if (openaiTranscript.length > current.length) return openaiTranscript;
+    } catch {
+      // continue to Gemini fallback
+    }
+  }
+
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return current;
 
-  const parsed = parseGcsUri(params.gcsUri);
-  if (!parsed) return current;
-
   try {
-    const file = storageClient.bucket(parsed.bucket).file(parsed.objectPath);
-    const [metadata] = await file.getMetadata();
-    const sizeBytes = Number(metadata.size ?? 0);
-    if (!Number.isFinite(sizeBytes) || sizeBytes <= 0 || sizeBytes > 15 * 1024 * 1024) {
-      return current;
-    }
-
-    const [buffer] = await file.download();
-    if (!buffer || buffer.length === 0) return current;
-
     const ai = new GoogleGenAI({ apiKey });
     const response = await ai.models.generateContent({
       model: process.env.GEMINI_MODEL ?? "gemini-2.5-flash",
@@ -800,13 +836,13 @@ export async function pollTranscriptionJob(job: TranscriptionJob): Promise<{
     longest && longest.transcript.trim().length >= fused.transcript.trim().length + 20
       ? longest
       : fused;
-  const geminiRecovered = await transcribeWithGeminiFallback({
+  const premiumRecovered = await transcribeWithPremiumFallback({
     gcsUri: job.gcsUri,
     mimeType: job.mimeType,
     currentTranscript: fusionBase.transcript,
   });
   const polished = await improveTranscriptForReadability(
-    geminiRecovered,
+    premiumRecovered,
     fusionBase.detectedLanguage,
   );
   const roles = await inferSpeakerRoles(polished, fusionBase.speakerCount);
