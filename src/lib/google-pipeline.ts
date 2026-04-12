@@ -812,11 +812,12 @@ async function transcribeWithPremiumFallback(params: {
           ].join(" "),
       });
       const openaiTranscript = response.text?.trim() ?? "";
+      const muchBetterThanCurrent = openaiTranscript.length >= current.length + 30;
       const hasRequiredHebrew =
         !params.selectedLanguages?.includes("iw-IL") ||
         hasHebrewCharacters(openaiTranscript);
       if (
-        hasRequiredHebrew &&
+        (hasRequiredHebrew || muchBetterThanCurrent) &&
         (openaiTranscript.length > current.length || (requiresHebrew && openaiTranscript.length > 0))
       ) {
         return openaiTranscript;
@@ -961,12 +962,18 @@ export async function pollTranscriptionJob(job: TranscriptionJob): Promise<{
   );
   const roles = await inferSpeakerRoles(polished, fusionBase.speakerCount);
   const detectedLanguagesRaw = await inferDetectedLanguages(roles.transcript, candidates);
-  const detectedLanguages =
+  const filteredDetectedLanguages =
     job.selectedLanguages && job.selectedLanguages.length > 0
       ? detectedLanguagesRaw.filter((language) =>
           job.selectedLanguages?.includes(language),
         )
       : detectedLanguagesRaw;
+  const detectedLanguages =
+    filteredDetectedLanguages.length > 0
+      ? filteredDetectedLanguages
+      : job.selectedLanguages && job.selectedLanguages.length > 0
+        ? [...job.selectedLanguages]
+        : detectedLanguagesRaw;
   const primaryLanguage =
     fusionBase.detectedLanguage !== "unknown" &&
     (!job.selectedLanguages || job.selectedLanguages.includes(fusionBase.detectedLanguage))
