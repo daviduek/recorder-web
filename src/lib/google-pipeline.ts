@@ -277,9 +277,7 @@ function selectPassSources(selectedLanguages?: SupportedLanguage[]): PassSource[
       : (["es-AR", "en-US", "iw-IL"] as SupportedLanguage[]);
 
   const manualSources = Array.from(new Set(validLanguages.map(sourceFromLanguage)));
-  if (manualSources.length <= 1) return manualSources;
-
-  return ["auto", ...manualSources];
+  return Array.from(new Set(["auto", ...manualSources]));
 }
 
 async function ensureBucket() {
@@ -753,9 +751,13 @@ async function transcribeWithPremiumFallback(params: {
   gcsUri: string;
   mimeType: string;
   currentTranscript: string;
+  selectedLanguages?: SupportedLanguage[];
 }) {
   const current = params.currentTranscript.trim();
-  if (current.length >= 40) return current;
+  const requiresHebrew =
+    params.selectedLanguages?.includes("iw-IL") &&
+    !hasHebrewCharacters(current);
+  if (current.length >= 40 && !requiresHebrew) return current;
 
   let buffer: Buffer | null = null;
   try {
@@ -776,10 +778,24 @@ async function transcribeWithPremiumFallback(params: {
         model: process.env.OPENAI_TRANSCRIBE_MODEL ?? "gpt-4o-transcribe",
         file,
         prompt:
-          "The audio may mix Spanish, English, and Hebrew. Transcribe faithfully and preserve each language.",
+          [
+            "The audio may mix Spanish, English, and Hebrew.",
+            "Transcribe faithfully in the original language.",
+            "Do not translate.",
+            "Do not transliterate Hebrew to Latin.",
+            "If Hebrew is spoken, keep Hebrew in Hebrew script.",
+          ].join(" "),
       });
       const openaiTranscript = response.text?.trim() ?? "";
-      if (openaiTranscript.length > current.length) return openaiTranscript;
+      const hasRequiredHebrew =
+        !params.selectedLanguages?.includes("iw-IL") ||
+        hasHebrewCharacters(openaiTranscript);
+      if (
+        hasRequiredHebrew &&
+        (openaiTranscript.length > current.length || (requiresHebrew && openaiTranscript.length > 0))
+      ) {
+        return openaiTranscript;
+      }
     } catch {
       // continue to Gemini fallback
     }
@@ -876,6 +892,7 @@ export async function pollTranscriptionJob(job: TranscriptionJob): Promise<{
     gcsUri: job.gcsUri,
     mimeType: job.mimeType,
     currentTranscript: fusionBase.transcript,
+    selectedLanguages: job.selectedLanguages,
   });
   const polished = await improveTranscriptForReadability(
     premiumRecovered,
