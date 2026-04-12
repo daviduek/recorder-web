@@ -103,12 +103,12 @@ function extensionFromMime(mimeType: string) {
   return "webm";
 }
 
-function speechEncodingFromMime(mimeType: string) {
-  if (mimeType.includes("webm")) return "ENCODING_UNSPECIFIED";
-  if (mimeType.includes("wav")) return "LINEAR16";
-  if (mimeType.includes("ogg")) return "ENCODING_UNSPECIFIED";
-  if (mimeType.includes("mpeg") || mimeType.includes("mp3")) return "MP3";
-  return "ENCODING_UNSPECIFIED";
+function speechEncodingCandidatesFromMime(mimeType: string) {
+  if (mimeType.includes("webm")) return ["WEBM_OPUS", "ENCODING_UNSPECIFIED"] as const;
+  if (mimeType.includes("wav")) return ["LINEAR16"] as const;
+  if (mimeType.includes("ogg")) return ["OGG_OPUS", "ENCODING_UNSPECIFIED"] as const;
+  if (mimeType.includes("mpeg") || mimeType.includes("mp3")) return ["MP3"] as const;
+  return ["ENCODING_UNSPECIFIED"] as const;
 }
 
 function normalizeLanguageCode(language: string): "es-AR" | "en-US" | "he-IL" {
@@ -306,52 +306,50 @@ async function startSinglePassOperation(
   mimeType: string,
 ) {
   const config = passConfig(source);
-  const encoding = speechEncodingFromMime(mimeType);
-  const sampleRateAttempts = [undefined];
-
+  const encodingCandidates = speechEncodingCandidatesFromMime(mimeType);
   let lastError: unknown = null;
-  for (const sampleRate of sampleRateAttempts) {
-    try {
-      const [operation] = await speechClient.longRunningRecognize({
-        config: {
-          languageCode: config.primaryLanguage,
-          alternativeLanguageCodes: config.alternativeLanguages,
-          enableAutomaticPunctuation: true,
-          speechContexts: [
-            { phrases: MIXED_CONTEXT_PHRASES },
-            { phrases: HEBREW_PHRASES },
-          ],
-          diarizationConfig: {
-            enableSpeakerDiarization: true,
-            minSpeakerCount: 1,
-            maxSpeakerCount: 3,
+
+  for (const encoding of encodingCandidates) {
+    const sampleRateAttempts =
+      encoding === "OGG_OPUS" || encoding === "WEBM_OPUS"
+        ? [48000, 24000, 16000, 12000, 8000, undefined]
+        : [undefined];
+
+    for (const sampleRate of sampleRateAttempts) {
+      try {
+        const [operation] = await speechClient.longRunningRecognize({
+          config: {
+            languageCode: config.primaryLanguage,
+            alternativeLanguageCodes: config.alternativeLanguages,
+            enableAutomaticPunctuation: true,
+            speechContexts: [
+              { phrases: MIXED_CONTEXT_PHRASES },
+              { phrases: HEBREW_PHRASES },
+            ],
+            diarizationConfig: {
+              enableSpeakerDiarization: true,
+              minSpeakerCount: 1,
+              maxSpeakerCount: 3,
+            },
+            enableWordTimeOffsets: true,
+            encoding,
+            ...(typeof sampleRate === "number" ? { sampleRateHertz: sampleRate } : {}),
           },
-          enableWordTimeOffsets: true,
-          encoding,
-          ...(typeof sampleRate === "number" ? { sampleRateHertz: sampleRate } : {}),
-        },
-        audio: { uri: gcsUri },
-      });
+          audio: { uri: gcsUri },
+        });
 
-      const name = operation.latestResponse?.name;
-      if (!name) {
-        throw new Error("No se pudo iniciar la operacion de transcripcion.");
+        const name = operation.latestResponse?.name;
+        if (!name) {
+          throw new Error("No se pudo iniciar la operacion de transcripcion.");
+        }
+
+        return {
+          source,
+          operationName: name,
+        } satisfies TranscriptionJobOperation;
+      } catch (error) {
+        lastError = error;
       }
-
-      return {
-        source,
-        operationName: name,
-      } satisfies TranscriptionJobOperation;
-    } catch (error) {
-      lastError = error;
-
-      if (sampleRateAttempts.length === 1) break;
-
-      const message =
-        error instanceof Error ? error.message : String(error ?? "");
-      const looksLikeOpusRateError =
-        message.includes("Opus sample rate") || message.includes("INVALID_ARGUMENT");
-      if (!looksLikeOpusRateError) break;
     }
   }
 
