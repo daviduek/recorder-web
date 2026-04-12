@@ -28,6 +28,11 @@ function languageLabel(code: RecordingItem["detectedLanguage"]) {
   return "Sin detectar";
 }
 
+function languageListLabel(codes?: RecordingItem["detectedLanguages"]) {
+  if (!codes || codes.length === 0) return "Sin detectar";
+  return codes.map((code) => languageLabel(code)).join(" + ");
+}
+
 function formatEta(seconds: number) {
   const safe = Math.max(0, seconds);
   const minutes = Math.floor(safe / 60)
@@ -411,6 +416,7 @@ export default function Home() {
       let lastStatus: {
         transcript?: string;
         detectedLanguage?: RecordingItem["detectedLanguage"];
+        detectedLanguages?: RecordingItem["detectedLanguages"];
         speakerCount?: number;
         speakerRoles?: string[];
         summary?: string;
@@ -431,6 +437,7 @@ export default function Home() {
           progress?: number;
           transcript?: string;
           detectedLanguage?: RecordingItem["detectedLanguage"];
+          detectedLanguages?: RecordingItem["detectedLanguages"];
           speakerCount?: number;
           speakerRoles?: string[];
           summary?: string;
@@ -469,6 +476,7 @@ export default function Home() {
           summary: lastStatus.summary,
           summaryAudioDataUrl: lastStatus.summaryAudioDataUrl,
           detectedLanguage: lastStatus.detectedLanguage,
+          detectedLanguages: lastStatus.detectedLanguages,
           durationSeconds,
           speakerCount: lastStatus.speakerCount,
           speakerRoles: lastStatus.speakerRoles,
@@ -763,6 +771,9 @@ export default function Home() {
                   {item.speakerRoles && item.speakerRoles.length > 0
                     ? ` (${item.speakerRoles.join(", ")})`
                     : ""}
+                </p>
+                <p className="meta">
+                  Idiomas detectados: {languageListLabel(item.detectedLanguages)}
                 </p>
 
                 <div className="audio-stack">

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+﻿import { randomUUID } from "node:crypto";
 
 import { GoogleGenAI } from "@google/genai";
 import speech from "@google-cloud/speech";
@@ -104,9 +104,9 @@ function extensionFromMime(mimeType: string) {
 }
 
 function speechEncodingFromMime(mimeType: string) {
-  if (mimeType.includes("webm")) return "WEBM_OPUS";
+  if (mimeType.includes("webm")) return "ENCODING_UNSPECIFIED";
   if (mimeType.includes("wav")) return "LINEAR16";
-  if (mimeType.includes("ogg")) return "OGG_OPUS";
+  if (mimeType.includes("ogg")) return "ENCODING_UNSPECIFIED";
   if (mimeType.includes("mpeg") || mimeType.includes("mp3")) return "MP3";
   return "ENCODING_UNSPECIFIED";
 }
@@ -175,16 +175,17 @@ function buildTranscriptWithSpeakers(
     }> | null;
   }>,
 ) {
+  const fallback = results
+    .map((result) => result.alternatives?.[0]?.transcript?.trim() ?? "")
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+
   const words = results
     .flatMap((result) => result.alternatives?.[0]?.words ?? [])
     .filter(Boolean) as Array<{ word?: string | null; speakerTag?: number | null }>;
 
   if (words.length === 0) {
-    const fallback = results
-      .map((result) => result.alternatives?.[0]?.transcript?.trim() ?? "")
-      .filter(Boolean)
-      .join(" ")
-      .trim();
     return { transcript: fallback, speakerCount: 1 };
   }
 
@@ -209,6 +210,16 @@ function buildTranscriptWithSpeakers(
     .map((chunk) => `[S${chunk.speaker}] ${chunk.text.join(" ").trim()}`)
     .join("\n")
     .trim();
+
+  if (
+    fallback.length > 0 &&
+    (diarized.length < Math.round(fallback.length * 0.6) || chunks.length <= 1)
+  ) {
+    return {
+      transcript: fallback,
+      speakerCount: Math.max(1, Math.min(3, uniqueSpeakers.size || 1)),
+    };
+  }
 
   return {
     transcript: diarized,
@@ -296,13 +307,10 @@ async function startSinglePassOperation(
 ) {
   const config = passConfig(source);
   const encoding = speechEncodingFromMime(mimeType);
-  const opusFallbackRates =
-    encoding === "OGG_OPUS" || encoding === "WEBM_OPUS"
-      ? [48000, 24000, 16000, 12000, 8000]
-      : [undefined];
+  const sampleRateAttempts = [undefined];
 
   let lastError: unknown = null;
-  for (const sampleRate of opusFallbackRates) {
+  for (const sampleRate of sampleRateAttempts) {
     try {
       const [operation] = await speechClient.longRunningRecognize({
         config: {
@@ -318,6 +326,7 @@ async function startSinglePassOperation(
             minSpeakerCount: 1,
             maxSpeakerCount: 3,
           },
+          enableWordTimeOffsets: true,
           encoding,
           ...(typeof sampleRate === "number" ? { sampleRateHertz: sampleRate } : {}),
         },
@@ -336,7 +345,7 @@ async function startSinglePassOperation(
     } catch (error) {
       lastError = error;
 
-      if (opusFallbackRates.length === 1) break;
+      if (sampleRateAttempts.length === 1) break;
 
       const message =
         error instanceof Error ? error.message : String(error ?? "");
@@ -607,11 +616,71 @@ async function inferSpeakerRoles(transcript: string, speakerCount: number) {
   }
 }
 
+async function inferDetectedLanguages(
+  transcript: string,
+  candidates: TranscriptionCandidate[],
+) {
+  const detected = new Set<SupportedLanguage>();
+  for (const candidate of candidates) {
+    if (candidate.detectedLanguage !== "unknown") {
+      detected.add(candidate.detectedLanguage);
+    }
+  }
+  if (hasHebrewCharacters(transcript)) detected.add("iw-IL");
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey || transcript.trim().length === 0) {
+    return [...detected];
+  }
+
+  try {
+    const ai = new GoogleGenAI({ apiKey });
+    const response = await ai.models.generateContent({
+      model: process.env.GEMINI_MODEL ?? "gemini-2.5-flash",
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              text: [
+                "Detecta idiomas presentes en esta transcripcion.",
+                "Idiomas permitidos: es-AR, en-US, iw-IL.",
+                "Devuelve JSON estricto con array de codigos.",
+                'Formato: {"languages":["es-AR","en-US"]}',
+                "",
+                "TRANSCRIPCION:",
+                transcript.slice(0, 12000),
+              ].join("\n"),
+            },
+          ],
+        },
+      ],
+      config: { temperature: 0 },
+    });
+
+    const raw = response.text?.trim();
+    if (raw) {
+      const cleaned = raw.replace(/^```json\s*/i, "").replace(/```$/, "").trim();
+      const parsed = JSON.parse(cleaned) as { languages?: string[] };
+      for (const language of parsed.languages ?? []) {
+        if (language === "es-AR" || language === "en-US" || language === "iw-IL") {
+          detected.add(language);
+        }
+      }
+    }
+  } catch {
+    // keep best-effort detected set
+  }
+
+  return [...detected];
+}
+
 export async function pollTranscriptionJob(job: TranscriptionJob): Promise<{
   done: boolean;
   progress: number;
   transcript?: string;
   detectedLanguage?: SupportedLanguage | "unknown";
+  detectedLanguages?: SupportedLanguage[];
   speakerCount?: number;
   speakerRoles?: string[];
 }> {
@@ -651,12 +720,18 @@ export async function pollTranscriptionJob(job: TranscriptionJob): Promise<{
     fused.detectedLanguage,
   );
   const roles = await inferSpeakerRoles(polished, fused.speakerCount);
+  const detectedLanguages = await inferDetectedLanguages(roles.transcript, candidates);
+  const primaryLanguage =
+    fused.detectedLanguage !== "unknown"
+      ? fused.detectedLanguage
+      : detectedLanguages[0] ?? "unknown";
 
   return {
     done: true,
     progress: 100,
     transcript: roles.transcript,
-    detectedLanguage: fused.detectedLanguage,
+    detectedLanguage: primaryLanguage,
+    detectedLanguages,
     speakerCount: roles.speakerCount,
     speakerRoles: roles.roles,
   };

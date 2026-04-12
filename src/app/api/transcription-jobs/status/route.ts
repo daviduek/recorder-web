@@ -53,6 +53,7 @@ export async function POST(request: Request) {
       progress: 100,
       transcript,
       detectedLanguage,
+      detectedLanguages: status.detectedLanguages ?? [],
       speakerCount: status.speakerCount ?? 1,
       speakerRoles: status.speakerRoles ?? [],
       summary,

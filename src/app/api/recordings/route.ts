@@ -15,6 +15,7 @@ type CreateRecordingBody = {
   summary?: string;
   summaryAudioDataUrl?: string;
   detectedLanguage?: RecordingItem["detectedLanguage"];
+  detectedLanguages?: RecordingItem["detectedLanguages"];
   durationSeconds?: number;
   speakerCount?: number;
   speakerRoles?: string[];
@@ -52,6 +53,12 @@ export async function POST(request: Request) {
       transcript: body.transcript,
       summary: body.summary,
       detectedLanguage: body.detectedLanguage ?? "unknown",
+      detectedLanguages: Array.isArray(body.detectedLanguages)
+        ? body.detectedLanguages.filter(
+            (language): language is "es-AR" | "en-US" | "iw-IL" =>
+              language === "es-AR" || language === "en-US" || language === "iw-IL",
+          )
+        : undefined,
       durationSeconds: Number.isFinite(Number(body.durationSeconds))
         ? Number(body.durationSeconds)
         : 0,
