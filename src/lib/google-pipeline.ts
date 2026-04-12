@@ -52,6 +52,7 @@ export type TranscriptionJob = {
   operations: TranscriptionJobOperation[];
   mimeType: string;
   gcsUri: string;
+  selectedLanguages?: SupportedLanguage[];
 };
 
 type TranscriptionCandidate = {
@@ -413,6 +414,7 @@ export async function startTranscriptionJob(params: {
     operations,
     mimeType: params.mimeType,
     gcsUri: params.gcsUri,
+    selectedLanguages: params.selectedLanguages,
   };
 }
 
@@ -880,11 +882,18 @@ export async function pollTranscriptionJob(job: TranscriptionJob): Promise<{
     fusionBase.detectedLanguage,
   );
   const roles = await inferSpeakerRoles(polished, fusionBase.speakerCount);
-  const detectedLanguages = await inferDetectedLanguages(roles.transcript, candidates);
+  const detectedLanguagesRaw = await inferDetectedLanguages(roles.transcript, candidates);
+  const detectedLanguages =
+    job.selectedLanguages && job.selectedLanguages.length > 0
+      ? detectedLanguagesRaw.filter((language) =>
+          job.selectedLanguages?.includes(language),
+        )
+      : detectedLanguagesRaw;
   const primaryLanguage =
-    fusionBase.detectedLanguage !== "unknown"
+    fusionBase.detectedLanguage !== "unknown" &&
+    (!job.selectedLanguages || job.selectedLanguages.includes(fusionBase.detectedLanguage))
       ? fusionBase.detectedLanguage
-      : detectedLanguages[0] ?? "unknown";
+      : detectedLanguages[0] ?? job.selectedLanguages?.[0] ?? "unknown";
 
   return {
     done: true,
