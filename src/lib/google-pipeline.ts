@@ -134,6 +134,23 @@ function hasHebrewCharacters(text: string) {
   return /[\u0590-\u05FF]/.test(text);
 }
 
+function inferLanguagesFromTextHeuristics(text: string) {
+  const detected = new Set<SupportedLanguage>();
+  const normalized = text.toLowerCase();
+
+  if (hasHebrewCharacters(text)) detected.add("iw-IL");
+
+  if (/[¿¡áéíóúñ]/i.test(text) || /\b(el|la|los|las|de|que|para|como|pero|bien)\b/.test(normalized)) {
+    detected.add("es-AR");
+  }
+
+  if (/\b(the|and|with|this|that|is|are|you|we)\b/.test(normalized)) {
+    detected.add("en-US");
+  }
+
+  return [...detected];
+}
+
 function inferLanguageFromTranscript(
   transcript: string,
   detectedFromApi: string,
@@ -643,12 +660,14 @@ async function inferDetectedLanguages(
   candidates: TranscriptionCandidate[],
 ) {
   const detected = new Set<SupportedLanguage>();
+  for (const language of inferLanguagesFromTextHeuristics(transcript)) {
+    detected.add(language);
+  }
   for (const candidate of candidates) {
     if (candidate.detectedLanguage !== "unknown") {
       detected.add(candidate.detectedLanguage);
     }
   }
-  if (hasHebrewCharacters(transcript)) detected.add("iw-IL");
 
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey || transcript.trim().length === 0) {
