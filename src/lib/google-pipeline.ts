@@ -755,7 +755,7 @@ async function inferDetectedLanguages(
   return [...detected];
 }
 
-async function loadAudioBufferForFallback(gcsUri: string, maxBytes = 24 * 1024 * 1024) {
+async function loadAudioBufferForFallback(gcsUri: string, maxBytes = 25 * 1024 * 1024) {
   const parsed = parseGcsUri(gcsUri);
   if (!parsed) return null;
 
@@ -769,6 +769,60 @@ async function loadAudioBufferForFallback(gcsUri: string, maxBytes = 24 * 1024 *
   const [buffer] = await file.download();
   if (!buffer || buffer.length === 0) return null;
   return buffer;
+}
+
+/**
+ * Convierte hebreo fonético/romanizado a caracteres hebreos reales.
+ * Se llama después de Whisper cuando el output no tiene caracteres hebreos
+ * pero se esperaba contenido en hebreo.
+ *
+ * Ejemplo: "shalom, ma nishma?" → "שלום, מה נשמע?"
+ */
+async function fixPhoneticHebrew(transcript: string): Promise<string> {
+  const chatModel = process.env.OPENAI_CHAT_MODEL ?? "gpt-4.1";
+  if (!openaiClient) return transcript;
+
+  try {
+    const response = await openaiClient.chat.completions.create({
+      model: chatModel,
+      temperature: 0,
+      messages: [
+        {
+          role: "system",
+          content: [
+            "You are a Hebrew language expert.",
+            "The transcript below was auto-generated and Hebrew words ended up in phonetic Latin transliteration.",
+            "Your task: identify every Hebrew word written phonetically and replace it with the correct Hebrew Unicode characters.",
+            "Rules:",
+            "1. Keep Spanish and English text completely unchanged.",
+            "2. Convert ONLY the phonetically written Hebrew words to Hebrew script.",
+            "3. Examples: shalom→שלום, toda/todah→תודה, ken→כן, lo→לא, ani→אני, ata→אתה, beseder→בסדר, ma nishma→מה נשמע, boker tov→בוקר טוב, lehitraot→להתראות.",
+            "4. Return ONLY the corrected transcript, nothing else.",
+          ].join(" "),
+        },
+        { role: "user", content: transcript },
+      ],
+    });
+    return response.choices[0]?.message?.content?.trim() ?? transcript;
+  } catch {
+    // If model not available, try gpt-4o fallback
+    try {
+      const response = await openaiClient.chat.completions.create({
+        model: "gpt-4o",
+        temperature: 0,
+        messages: [
+          {
+            role: "system",
+            content: "Convert phonetically written Hebrew words to Hebrew Unicode characters. Keep Spanish and English unchanged. Return only the corrected transcript.",
+          },
+          { role: "user", content: transcript },
+        ],
+      });
+      return response.choices[0]?.message?.content?.trim() ?? transcript;
+    } catch {
+      return transcript;
+    }
+  }
 }
 
 async function transcribeWithPremiumFallback(params: {
@@ -786,7 +840,7 @@ async function transcribeWithPremiumFallback(params: {
 
   let buffer: Buffer | null = null;
   try {
-    buffer = await loadAudioBufferForFallback(params.gcsUri, 24 * 1024 * 1024);
+    buffer = await loadAudioBufferForFallback(params.gcsUri, 25 * 1024 * 1024);
   } catch {
     buffer = null;
   }
@@ -799,29 +853,31 @@ async function transcribeWithPremiumFallback(params: {
         `fallback.${extensionFromMime(params.mimeType || "audio/ogg")}`,
         { type: params.mimeType || "audio/ogg" },
       );
-      // Forzar language:"he" siempre que hebreo esté entre los idiomas
-      // seleccionados — incluso cuando hay otros idiomas activos.
-      // gpt-4o-transcribe maneja code-switching correctamente con language:"he"
-      // y produce caracteres hebreos (אבג...) en vez de transliteración latina.
-      // Sin este hint, Whisper auto-detecta y puede romanizar el hebreo.
-      const hasHebrew = params.selectedLanguages?.includes("iw-IL") ?? false;
-      const whisperLanguageHint = hasHebrew ? "he" : undefined;
-
+      // NO pasar language hint — con audio mixto (español+hebreo+inglés), pasar
+      // language:"he" hace que Whisper silencia los segmentos no-hebreos y trunca
+      // el transcript. En cambio, dejamos que Whisper transcriba TODO y luego
+      // GPT convierte el hebreo fonético a caracteres hebreos como post-proceso.
       const response = await openaiClient.audio.transcriptions.create({
         model: process.env.OPENAI_TRANSCRIBE_MODEL ?? "gpt-4o-transcribe",
         file,
-        ...(whisperLanguageHint ? { language: whisperLanguageHint } : {}),
         prompt:
           [
-            "IMPORTANT: Hebrew speech MUST be written using Hebrew characters (א ב ג ד...), never in Latin/phonetic transliteration.",
-            "The audio may mix Spanish, English, and Hebrew in the same sentence.",
-            "Transcribe each word exactly in its original spoken language and script.",
-            "Spanish → Latin characters. English → Latin characters. Hebrew → Hebrew characters (Unicode \\u05D0–\\u05EA).",
-            "Never write Hebrew words using Latin letters (no 'shalom', 'toda', 'ken' — write שלום, תודה, כן).",
-            "Do not translate anything.",
+            "This audio may mix Spanish, English, and Hebrew.",
+            "Transcribe every spoken word completely — do not skip any segment.",
+            "Hebrew words MUST use Hebrew Unicode characters (שלום תודה כן לא אני).",
+            "Spanish and English use Latin characters.",
+            "Do not translate. Do not summarize.",
           ].join(" "),
       });
-      const openaiTranscript = response.text?.trim() ?? "";
+      let openaiTranscript = response.text?.trim() ?? "";
+
+      // Post-proceso: si se esperaba hebreo y salió fonético (sin caracteres hebreos),
+      // GPT convierte las palabras hebreas romanizadas a script hebreo correcto.
+      const hebrewWasExpected = params.selectedLanguages?.includes("iw-IL") ?? false;
+      if (hebrewWasExpected && openaiTranscript.length > 0 && !hasHebrewCharacters(openaiTranscript)) {
+        openaiTranscript = await fixPhoneticHebrew(openaiTranscript);
+      }
+
       const muchBetterThanCurrent = openaiTranscript.length >= current.length + 30;
       const hasRequiredHebrew =
         !params.selectedLanguages?.includes("iw-IL") ||
