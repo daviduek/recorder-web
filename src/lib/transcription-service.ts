@@ -4,21 +4,21 @@
  * Whisper-first routing layer for audio transcription.
  *
  * Routing strategy (checked in order):
- *  1. File size ≤ 24 MB AND OPENAI_API_KEY set
+ *  1. OPENAI_API_KEY set AND (file ≤ 24 MB OR size indeterminable)
  *     → mode: "openai_direct"  (OpenAI gpt-4o-transcribe via existing pipeline)
- *  2. Otherwise
+ *  2. OPENAI_API_KEY set AND file confirmed > 24 MB
  *     → mode: "google"         (Google Cloud STT LongRunningRecognize)
+ *  3. No OPENAI_API_KEY
+ *     → mode: "google"
+ *
+ * "Size indeterminable" covers GCS metadata failures (bucket unreachable,
+ * billing not enabled on the GCS metadata API, etc.). In that case we prefer
+ * Whisper over Google STT because Google STT also requires billing and would
+ * fail with the same error at a later stage.
  *
  * Both paths are polled via the EXISTING /api/transcription-jobs/status endpoint.
  * This module does NOT replace google-pipeline.ts — it sits in front of it as
  * a size-aware routing layer for the new /api/upload-audio endpoint.
- *
- * For files > 24 MB (e.g. 1-hour MP3 at 128 kbps ≈ 57 MB), Google STT is used
- * because it accepts GCS URIs directly with no file-size limit.
- *
- * Chunking note: splitting compressed audio (MP3/M4A) without re-encoding
- * requires ffmpeg. Rather than add that dependency, we route large files to
- * Google STT which already handles them reliably in production.
  */
 
 import { Storage } from "@google-cloud/storage";
@@ -137,12 +137,16 @@ export async function createTranscriptionJob(
 
   if (hasOpenAI) {
     const fileSizeBytes = await getGcsFileSizeBytes(params.gcsUri);
-    const fitsInWhisper = fileSizeBytes > 0 && fileSizeBytes <= WHISPER_MAX_BYTES;
 
-    if (fitsInWhisper) {
-      // Signal to the existing poller to use the OpenAI/Whisper path directly.
-      // pollTranscriptionJob in google-pipeline.ts handles mode: "openai_direct"
-      // by downloading from GCS and calling transcribeWithPremiumFallback.
+    // Route to Whisper when:
+    //  - File fits within Whisper's 25 MB limit, OR
+    //  - File size could not be determined (GCS metadata unreachable, billing
+    //    not enabled, bucket doesn't exist yet, etc.). In that case we still
+    //    prefer Whisper because Google STT also requires billing and would fail
+    //    with the same error later in the polling step.
+    const confirmedTooLarge = fileSizeBytes > WHISPER_MAX_BYTES;
+
+    if (!confirmedTooLarge) {
       return {
         operations: [],
         mimeType: params.mimeType,
@@ -153,7 +157,7 @@ export async function createTranscriptionJob(
     }
   }
 
-  // File too large for Whisper, or no OpenAI key configured.
+  // File confirmed > 24 MB, or no OpenAI key.
   // Delegate to Google Cloud STT (handles multi-hour audio via GCS URIs).
   return startTranscriptionJob(params);
 }
