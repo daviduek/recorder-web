@@ -17,6 +17,7 @@ type CreateRecordingBody = {
   // ── Explicit new field names (preferred) ───────────────────────────────────
   original_text?: string;
   ai_response_es?: string;
+  translations?: Partial<Record<"es-AR" | "en-US" | "iw-IL", string>>;
   // ── Audio ──────────────────────────────────────────────────────────────────
   inputAudioUrl?: string;
   inputAudioStorageUri?: string;
@@ -80,6 +81,9 @@ export async function POST(request: Request) {
       // ── AI response ─────────────────────────────────────────────────────────
       ai_response_es: summaryText,
       summary: summaryText, // backward compat
+
+      // ── Traducciones ────────────────────────────────────────────────────────
+      translations: body.translations,
 
       // ── Language metadata ───────────────────────────────────────────────────
       detectedLanguage: body.detectedLanguage ?? "unknown",

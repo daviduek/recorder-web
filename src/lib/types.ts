@@ -35,6 +35,14 @@ export type RecordingItem = {
   /** @deprecated Prefer `ai_response_es`. Kept for backward compatibility. */
   summary: string;
 
+  // ── Translations ──────────────────────────────────────────────────────────────
+  /**
+   * Full transcript translated into each selected language by GPT.
+   * Keys are SupportedLanguage codes; values are complete translations.
+   * Example: { "es-AR": "...", "en-US": "...", "iw-IL": "..." }
+   */
+  translations?: Partial<Record<SupportedLanguage, string>>;
+
   // ── Language metadata ─────────────────────────────────────────────────────────
   detectedLanguage: SupportedLanguage | "unknown";
   detectedLanguages?: SupportedLanguage[];

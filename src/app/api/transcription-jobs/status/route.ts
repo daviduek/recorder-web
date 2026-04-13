@@ -7,7 +7,7 @@ import {
   type TranscriptionJob,
 } from "@/lib/google-pipeline";
 import { addLanguageTags } from "@/lib/language-detection";
-import { generateSpanishResponse } from "@/lib/ai-response";
+import { generateSpanishResponse, translateToAllLanguages } from "@/lib/ai-response";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -61,10 +61,18 @@ export async function POST(request: Request) {
     // Cae gracefully al transcript crudo si el servicio de IA no está disponible.
     const transcript = await addLanguageTags(rawTranscript);
 
-    // ── Text responses — en paralelo para reducir latencia ────────────────────
-    const [summary, ai_response_es] = await Promise.all([
-      summarizeTranscript(transcript), // backward-compat, siempre en español
-      generateSpanishResponse(transcript), // nuevo campo explícito
+    // ── Idiomas a los que traducir ────────────────────────────────────────────
+    // Si el usuario seleccionó idiomas específicos, traducir solo a esos.
+    // Si no, traducir a los 3 soportados por defecto.
+    const targetLanguages = (body.job.selectedLanguages?.length ?? 0) > 0
+      ? body.job.selectedLanguages!
+      : (["es-AR", "en-US", "iw-IL"] as const);
+
+    // ── Text responses — todo en paralelo para minimizar latencia ─────────────
+    const [summary, ai_response_es, translations] = await Promise.all([
+      summarizeTranscript(transcript),          // backward-compat, siempre español
+      generateSpanishResponse(transcript),      // respuesta estructurada en español
+      translateToAllLanguages(transcript, [...targetLanguages]), // transcript completo × idioma
     ]);
 
     // ── TTS (opcional) ────────────────────────────────────────────────────────
@@ -88,6 +96,7 @@ export async function POST(request: Request) {
       // ── Respuestas IA ──────────────────────────────────────────────────────
       summary,                // backward compat (siempre español)
       ai_response_es,         // nuevo: formato estructurado, siempre español
+      translations,           // transcript completo traducido a cada idioma seleccionado
       // ── Audio ──────────────────────────────────────────────────────────────
       summaryAudioDataUrl,    // vacío si Google TTS no está disponible
       // ── Metadata ───────────────────────────────────────────────────────────

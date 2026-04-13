@@ -1,21 +1,27 @@
 /**
  * ai-response.ts
  *
- * Generates a structured AI response ALWAYS in Spanish, regardless of the
- * input language(s). Kept as a standalone module so it can evolve
- * independently of the transcription pipeline.
+ * Two responsibilities:
  *
- * Output format:
- *   1) Contexto general  — 1–2 lines
- *   2) Puntos clave      — 3–6 bullets starting with "• "
- *   3) Cierre / acciones — 1–2 lines
+ * 1. generateSpanishResponse — structured AI analysis always in Spanish.
  *
- * Primary:  OpenAI (model via OPENAI_SUMMARY_MODEL, default gpt-4o-mini)
- * Fallback: Google Gemini (model via GEMINI_MODEL, default gemini-2.5-flash)
+ * 2. translateToAllLanguages — takes the full transcript (from Whisper, in
+ *    whatever language was spoken) and uses GPT to produce a complete
+ *    translation into each selected language.
+ *    Rules:
+ *      - Translate the ENTIRE content, never truncate or summarize.
+ *      - Preserve speaker tags [S1], [S2], [S3] and language markers.
+ *      - For Hebrew use Hebrew script, never transliterate.
+ *      - Run all language translations in parallel (Promise.all).
+ *
+ * Primary model: gpt-4o (better multilingual / Hebrew quality).
+ * Fallback:      gpt-4o-mini → Gemini.
  */
 
 import { GoogleGenAI } from "@google/genai";
 import OpenAI from "openai";
+
+import type { SupportedLanguage } from "@/lib/types";
 
 // ─── Prompts ──────────────────────────────────────────────────────────────────
 
@@ -123,4 +129,130 @@ export async function generateSpanishResponse(
   }
 
   return buildFallbackResponse(trimmed);
+}
+
+// ─── Translation ──────────────────────────────────────────────────────────────
+
+const LANGUAGE_DISPLAY: Record<SupportedLanguage, string> = {
+  "es-AR": "Spanish (Argentina)",
+  "en-US": "English (US)",
+  "iw-IL": "Hebrew",
+};
+
+const TRANSLATION_SYSTEM = (targetLang: string) =>
+  [
+    `You are a professional translator. Translate the following audio transcript to ${targetLang}.`,
+    "Rules:",
+    "1. Translate the COMPLETE transcript — every single line, never skip or summarize.",
+    "2. If a section is already in the target language, keep it exactly as-is.",
+    "3. Preserve all speaker tags like [S1], [S2], [S3] without changes.",
+    "4. Preserve inline language markers like [HE], [EN], [ES] without changes.",
+    "5. For Hebrew output: use Hebrew characters — never transliterate to Latin.",
+    "6. Return ONLY the translated transcript, no explanations or headers.",
+  ].join("\n");
+
+/**
+ * Translates the full transcript to a single target language using GPT.
+ * Falls back to Gemini if OpenAI is unavailable.
+ * Returns the original transcript if all attempts fail.
+ */
+export async function translateToLanguage(
+  transcript: string,
+  targetLanguage: SupportedLanguage,
+): Promise<string> {
+  const trimmed = transcript.trim();
+  if (!trimmed) return trimmed;
+
+  const langDisplay = LANGUAGE_DISPLAY[targetLanguage];
+  const systemPrompt = TRANSLATION_SYSTEM(langDisplay);
+
+  // ── Primary: OpenAI gpt-4o (mejor calidad multilingüe / hebreo) ────────────
+  const openaiKey = process.env.OPENAI_API_KEY;
+  if (openaiKey) {
+    try {
+      const openai = new OpenAI({ apiKey: openaiKey });
+      const completion = await openai.chat.completions.create({
+        // gpt-4o tiene mejor calidad en hebreo y code-switching que mini
+        model: "gpt-4o",
+        temperature: 0.1,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: trimmed },
+        ],
+      });
+
+      const result = completion.choices[0]?.message?.content?.trim();
+      if (result && result.length > 0) return result;
+    } catch {
+      // fall through to mini
+    }
+
+    // ── Fallback: gpt-4o-mini ─────────────────────────────────────────────────
+    try {
+      const openai = new OpenAI({ apiKey: openaiKey });
+      const completion = await openai.chat.completions.create({
+        model: process.env.OPENAI_SUMMARY_MODEL ?? "gpt-4o-mini",
+        temperature: 0.1,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: trimmed },
+        ],
+      });
+
+      const result = completion.choices[0]?.message?.content?.trim();
+      if (result && result.length > 0) return result;
+    } catch {
+      // fall through to Gemini
+    }
+  }
+
+  // ── Fallback: Gemini ───────────────────────────────────────────────────────
+  const geminiKey = process.env.GEMINI_API_KEY;
+  if (geminiKey) {
+    try {
+      const ai = new GoogleGenAI({ apiKey: geminiKey });
+      const response = await ai.models.generateContent({
+        model: process.env.GEMINI_MODEL ?? "gemini-2.5-flash",
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: `${systemPrompt}\n\nTRANSCRIPT:\n${trimmed}` }],
+          },
+        ],
+        config: { temperature: 0.1 },
+      });
+
+      const result = response.text?.trim();
+      if (result && result.length > 0) return result;
+    } catch {
+      // return original
+    }
+  }
+
+  return trimmed;
+}
+
+/**
+ * Translates the full transcript into ALL requested languages in parallel.
+ * If a language matches the already-detected source language, still runs
+ * translation so the output is cleaned and normalized.
+ *
+ * @param transcript - Full transcript (may contain [HE]/[EN]/[ES] tags).
+ * @param languages  - Languages to translate into. Defaults to all 3.
+ * @returns Map of language code → full translated transcript.
+ */
+export async function translateToAllLanguages(
+  transcript: string,
+  languages: SupportedLanguage[] = ["es-AR", "en-US", "iw-IL"],
+): Promise<Partial<Record<SupportedLanguage, string>>> {
+  if (!transcript.trim() || languages.length === 0) return {};
+
+  const entries = await Promise.all(
+    languages.map(async (lang) => {
+      const translated = await translateToLanguage(transcript, lang);
+      return [lang, translated] as [SupportedLanguage, string];
+    }),
+  );
+
+  return Object.fromEntries(entries);
 }
