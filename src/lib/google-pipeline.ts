@@ -799,14 +799,13 @@ async function transcribeWithPremiumFallback(params: {
         `fallback.${extensionFromMime(params.mimeType || "audio/ogg")}`,
         { type: params.mimeType || "audio/ogg" },
       );
-      // Cuando solo hay hebreo seleccionado, forzar language:"he" para que
-      // Whisper emita caracteres hebreos en vez de transliterar a latín.
-      // Con múltiples idiomas se omite para que auto-detecte por segmento.
-      const whisperLanguageHint =
-        params.selectedLanguages?.length === 1 &&
-        params.selectedLanguages[0] === "iw-IL"
-          ? "he"
-          : undefined;
+      // Forzar language:"he" siempre que hebreo esté entre los idiomas
+      // seleccionados — incluso cuando hay otros idiomas activos.
+      // gpt-4o-transcribe maneja code-switching correctamente con language:"he"
+      // y produce caracteres hebreos (אבג...) en vez de transliteración latina.
+      // Sin este hint, Whisper auto-detecta y puede romanizar el hebreo.
+      const hasHebrew = params.selectedLanguages?.includes("iw-IL") ?? false;
+      const whisperLanguageHint = hasHebrew ? "he" : undefined;
 
       const response = await openaiClient.audio.transcriptions.create({
         model: process.env.OPENAI_TRANSCRIBE_MODEL ?? "gpt-4o-transcribe",
@@ -814,11 +813,12 @@ async function transcribeWithPremiumFallback(params: {
         ...(whisperLanguageHint ? { language: whisperLanguageHint } : {}),
         prompt:
           [
-            "The audio may mix Spanish, English, and Hebrew.",
-            "Transcribe faithfully in the original language.",
-            "Do not translate.",
-            "Do not transliterate Hebrew to Latin.",
-            "If Hebrew is spoken, keep Hebrew in Hebrew script.",
+            "IMPORTANT: Hebrew speech MUST be written using Hebrew characters (א ב ג ד...), never in Latin/phonetic transliteration.",
+            "The audio may mix Spanish, English, and Hebrew in the same sentence.",
+            "Transcribe each word exactly in its original spoken language and script.",
+            "Spanish → Latin characters. English → Latin characters. Hebrew → Hebrew characters (Unicode \\u05D0–\\u05EA).",
+            "Never write Hebrew words using Latin letters (no 'shalom', 'toda', 'ken' — write שלום, תודה, כן).",
+            "Do not translate anything.",
           ].join(" "),
       });
       const openaiTranscript = response.text?.trim() ?? "";

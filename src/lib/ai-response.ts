@@ -80,13 +80,30 @@ export async function generateSpanishResponse(
   const trimmed = transcript.trim();
   if (!trimmed) return buildFallbackResponse("");
 
-  // ── Primary: OpenAI ────────────────────────────────────────────────────────
+  // ── Primary: gpt-4.1 ──────────────────────────────────────────────────────
   const openaiKey = process.env.OPENAI_API_KEY;
   if (openaiKey) {
     try {
       const openai = new OpenAI({ apiKey: openaiKey });
       const completion = await openai.chat.completions.create({
-        model: process.env.OPENAI_SUMMARY_MODEL ?? "gpt-4o-mini",
+        model: "gpt-4.1",
+        temperature: 0.3,
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: buildUserPrompt(trimmed) },
+        ],
+      });
+
+      const result = completion.choices[0]?.message?.content?.trim();
+      if (result && result.length > 40) return result;
+    } catch {
+      // fall through to gpt-4o
+    }
+
+    try {
+      const openai = new OpenAI({ apiKey: openaiKey });
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o",
         temperature: 0.3,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
@@ -147,7 +164,7 @@ const TRANSLATION_SYSTEM = (targetLang: string) =>
     "2. If a section is already in the target language, keep it exactly as-is.",
     "3. Preserve all speaker tags like [S1], [S2], [S3] without changes.",
     "4. Preserve inline language markers like [HE], [EN], [ES] without changes.",
-    "5. For Hebrew output: use Hebrew characters — never transliterate to Latin.",
+    "5. CRITICAL for Hebrew output: ALWAYS use Hebrew Unicode characters (א ב ג ד ה ו ז ח ט י...). NEVER write Hebrew words in Latin letters. No transliteration. No phonetics.",
     "6. Return ONLY the translated transcript, no explanations or headers.",
   ].join("\n");
 
@@ -166,14 +183,13 @@ export async function translateToLanguage(
   const langDisplay = LANGUAGE_DISPLAY[targetLanguage];
   const systemPrompt = TRANSLATION_SYSTEM(langDisplay);
 
-  // ── Primary: OpenAI gpt-4o (mejor calidad multilingüe / hebreo) ────────────
+  // ── Primary: gpt-4.1 (último modelo, mejor calidad multilingüe / hebreo) ────
   const openaiKey = process.env.OPENAI_API_KEY;
   if (openaiKey) {
     try {
       const openai = new OpenAI({ apiKey: openaiKey });
       const completion = await openai.chat.completions.create({
-        // gpt-4o tiene mejor calidad en hebreo y code-switching que mini
-        model: "gpt-4o",
+        model: "gpt-4.1",
         temperature: 0.1,
         messages: [
           { role: "system", content: systemPrompt },
@@ -184,14 +200,14 @@ export async function translateToLanguage(
       const result = completion.choices[0]?.message?.content?.trim();
       if (result && result.length > 0) return result;
     } catch {
-      // fall through to mini
+      // fall through to gpt-4o
     }
 
-    // ── Fallback: gpt-4o-mini ─────────────────────────────────────────────────
+    // ── Fallback: gpt-4o ──────────────────────────────────────────────────────
     try {
       const openai = new OpenAI({ apiKey: openaiKey });
       const completion = await openai.chat.completions.create({
-        model: process.env.OPENAI_SUMMARY_MODEL ?? "gpt-4o-mini",
+        model: "gpt-4o",
         temperature: 0.1,
         messages: [
           { role: "system", content: systemPrompt },
