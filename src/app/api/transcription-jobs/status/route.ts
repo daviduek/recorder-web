@@ -6,6 +6,8 @@ import {
   summarizeTranscript,
   type TranscriptionJob,
 } from "@/lib/google-pipeline";
+import { addLanguageTags } from "@/lib/language-detection";
+import { generateSpanishResponse } from "@/lib/ai-response";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -41,8 +43,8 @@ export async function POST(request: Request) {
       });
     }
 
-    const transcript = status.transcript?.trim() ?? "";
-    if (!transcript) {
+    const rawTranscript = status.transcript?.trim() ?? "";
+    if (!rawTranscript) {
       return NextResponse.json(
         {
           error:
@@ -53,20 +55,46 @@ export async function POST(request: Request) {
     }
 
     const detectedLanguage = status.detectedLanguage ?? "unknown";
-    const summary = await summarizeTranscript(transcript);
-    const summaryAudioBuffer = await buildSummaryAudio(summary, detectedLanguage);
-    const summaryAudioDataUrl = `data:audio/mpeg;base64,${summaryAudioBuffer.toString("base64")}`;
+
+    // ── Language tagging ───────────────────────────────────────────────────────
+    // Inserta [HE] / [EN] / [ES] en los puntos donde cambia el idioma.
+    // Cae gracefully al transcript crudo si el servicio de IA no está disponible.
+    const transcript = await addLanguageTags(rawTranscript);
+
+    // ── Text responses — en paralelo para reducir latencia ────────────────────
+    const [summary, ai_response_es] = await Promise.all([
+      summarizeTranscript(transcript), // backward-compat, siempre en español
+      generateSpanishResponse(transcript), // nuevo campo explícito
+    ]);
+
+    // ── TTS (opcional) ────────────────────────────────────────────────────────
+    // Google Cloud TTS requiere billing habilitado. Si falla, se omite el audio
+    // del resumen sin romper la respuesta (la transcripción sigue siendo válida).
+    let summaryAudioDataUrl = "";
+    try {
+      const audioBuffer = await buildSummaryAudio(summary, detectedLanguage);
+      summaryAudioDataUrl = `data:audio/mpeg;base64,${audioBuffer.toString("base64")}`;
+    } catch (ttsError) {
+      const msg = ttsError instanceof Error ? ttsError.message : String(ttsError);
+      console.warn("[status] Google TTS no disponible, omitiendo audio:", msg);
+    }
 
     return NextResponse.json({
       done: true,
       progress: 100,
-      transcript,
+      // ── Transcripción ──────────────────────────────────────────────────────
+      transcript,             // con language tags, backward compat
+      original_text: transcript, // campo nuevo explícito
+      // ── Respuestas IA ──────────────────────────────────────────────────────
+      summary,                // backward compat (siempre español)
+      ai_response_es,         // nuevo: formato estructurado, siempre español
+      // ── Audio ──────────────────────────────────────────────────────────────
+      summaryAudioDataUrl,    // vacío si Google TTS no está disponible
+      // ── Metadata ───────────────────────────────────────────────────────────
       detectedLanguage,
       detectedLanguages: status.detectedLanguages ?? [],
       speakerCount: status.speakerCount ?? 1,
       speakerRoles: status.speakerRoles ?? [],
-      summary,
-      summaryAudioDataUrl,
     });
   } catch (error) {
     const message =

@@ -1,6 +1,15 @@
+/**
+ * POST /api/transcription-jobs/start
+ *
+ * Usa createTranscriptionJob (Whisper-first) en lugar de startTranscriptionJob
+ * (Google STT directo). Para archivos ≤ 24 MB con OPENAI_API_KEY configurada,
+ * devuelve mode:"openai_direct" → el status poller usa Whisper en vez de STT.
+ * Para archivos grandes, delega al pipeline Google STT existente.
+ */
+
 import { NextResponse } from "next/server";
 
-import { startTranscriptionJob } from "@/lib/google-pipeline";
+import { createTranscriptionJob } from "@/lib/transcription-service";
 import type { SupportedLanguage } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -33,7 +42,10 @@ export async function POST(request: Request) {
       );
     }
 
-    const job = await startTranscriptionJob({
+    // createTranscriptionJob enruta a Whisper (openai_direct) para archivos
+    // pequeños y a Google STT para archivos grandes. Reemplaza la llamada
+    // directa a startTranscriptionJob que requería billing en Google Cloud.
+    const job = await createTranscriptionJob({
       gcsUri,
       mimeType,
       durationSeconds: Number.isFinite(durationSeconds) ? durationSeconds : 0,

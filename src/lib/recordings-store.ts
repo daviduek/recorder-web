@@ -59,3 +59,16 @@ export async function appendRecording(recording: RecordingItem) {
   const updated = [recording, ...previous];
   await writeFile(RECORDINGS_FILE, JSON.stringify(updated, null, 2), "utf-8");
 }
+
+/**
+ * Returns all recordings belonging to the given session, sorted newest-first.
+ * Returns an empty array if no recordings exist for the session.
+ *
+ * @param sessionId - Client-generated session UUID (RecordingItem.session_id).
+ */
+export async function getRecordingsBySession(
+  sessionId: string,
+): Promise<RecordingItem[]> {
+  const all = await readRecordings();
+  return all.filter((r) => r.session_id === sessionId);
+}

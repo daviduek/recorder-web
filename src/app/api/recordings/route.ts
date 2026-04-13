@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-
 import { NextResponse } from "next/server";
 
 import { appendRecording, readRecordings } from "@/lib/recordings-store";
@@ -9,11 +8,20 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type CreateRecordingBody = {
-  inputAudioUrl?: string;
-  inputAudioStorageUri?: string;
+  // ── Required ───────────────────────────────────────────────────────────────
   transcript?: string;
   summary?: string;
+  // ── Session & user context (new) ───────────────────────────────────────────
+  session_id?: string;
+  user_id?: string;
+  // ── Explicit new field names (preferred) ───────────────────────────────────
+  original_text?: string;
+  ai_response_es?: string;
+  // ── Audio ──────────────────────────────────────────────────────────────────
+  inputAudioUrl?: string;
+  inputAudioStorageUri?: string;
   summaryAudioDataUrl?: string;
+  // ── Metadata ───────────────────────────────────────────────────────────────
   detectedLanguage?: RecordingItem["detectedLanguage"];
   detectedLanguages?: RecordingItem["detectedLanguages"];
   durationSeconds?: number;
@@ -37,9 +45,17 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as CreateRecordingBody;
-    if (!body.transcript || !body.summary) {
+
+    // Accept either the legacy field names or the new explicit ones
+    const transcriptText = body.original_text ?? body.transcript;
+    const summaryText = body.ai_response_es ?? body.summary;
+
+    if (!transcriptText || !summaryText) {
       return NextResponse.json(
-        { error: "Faltan transcript/summary para guardar la grabacion." },
+        {
+          error:
+            "Faltan campos requeridos: transcript (o original_text) y summary (o ai_response_es).",
+        },
         { status: 400 },
       );
     }
@@ -47,18 +63,34 @@ export async function POST(request: Request) {
     const recording: RecordingItem = {
       id: randomUUID(),
       createdAt: new Date().toISOString(),
+
+      // ── Session & user context ──────────────────────────────────────────────
+      session_id: body.session_id,
+      user_id: body.user_id,
+
+      // ── Audio sources ───────────────────────────────────────────────────────
       inputAudioUrl: body.inputAudioUrl,
       inputAudioStorageUri: body.inputAudioStorageUri,
       summaryAudioDataUrl: body.summaryAudioDataUrl,
-      transcript: body.transcript,
-      summary: body.summary,
+
+      // ── Transcription ───────────────────────────────────────────────────────
+      original_text: transcriptText,
+      transcript: transcriptText, // backward compat
+
+      // ── AI response ─────────────────────────────────────────────────────────
+      ai_response_es: summaryText,
+      summary: summaryText, // backward compat
+
+      // ── Language metadata ───────────────────────────────────────────────────
       detectedLanguage: body.detectedLanguage ?? "unknown",
       detectedLanguages: Array.isArray(body.detectedLanguages)
         ? body.detectedLanguages.filter(
-            (language): language is "es-AR" | "en-US" | "iw-IL" =>
-              language === "es-AR" || language === "en-US" || language === "iw-IL",
+            (l): l is "es-AR" | "en-US" | "iw-IL" =>
+              l === "es-AR" || l === "en-US" || l === "iw-IL",
           )
         : undefined,
+
+      // ── Speaker metadata ────────────────────────────────────────────────────
       durationSeconds: Number.isFinite(Number(body.durationSeconds))
         ? Number(body.durationSeconds)
         : 0,

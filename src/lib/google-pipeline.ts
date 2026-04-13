@@ -799,9 +799,19 @@ async function transcribeWithPremiumFallback(params: {
         `fallback.${extensionFromMime(params.mimeType || "audio/ogg")}`,
         { type: params.mimeType || "audio/ogg" },
       );
+      // Cuando solo hay hebreo seleccionado, forzar language:"he" para que
+      // Whisper emita caracteres hebreos en vez de transliterar a latín.
+      // Con múltiples idiomas se omite para que auto-detecte por segmento.
+      const whisperLanguageHint =
+        params.selectedLanguages?.length === 1 &&
+        params.selectedLanguages[0] === "iw-IL"
+          ? "he"
+          : undefined;
+
       const response = await openaiClient.audio.transcriptions.create({
         model: process.env.OPENAI_TRANSCRIBE_MODEL ?? "gpt-4o-transcribe",
         file,
+        ...(whisperLanguageHint ? { language: whisperLanguageHint } : {}),
         prompt:
           [
             "The audio may mix Spanish, English, and Hebrew.",
